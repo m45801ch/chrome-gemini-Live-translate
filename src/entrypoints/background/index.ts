@@ -4,6 +4,24 @@ import { getLiveTranslateConfig } from "@/utils/storage"
 let activeTabId: number | null = null;
 let liveTranslateStatus: "disconnected" | "connecting" | "connected" | "error" = "disconnected";
 
+// 從 storage 載入狀態以恢復被終止的 Service Worker 狀態
+chrome.storage.local.get(["activeTabId", "liveTranslateStatus"], (result) => {
+  if (result.activeTabId !== undefined) {
+    activeTabId = result.activeTabId;
+    console.log("[VLT] Restored activeTabId from storage:", activeTabId);
+  }
+  if (result.liveTranslateStatus !== undefined) {
+    liveTranslateStatus = result.liveTranslateStatus;
+    console.log("[VLT] Restored liveTranslateStatus from storage:", liveTranslateStatus);
+  }
+});
+
+function updateState(newTabId: number | null, newStatus: typeof liveTranslateStatus) {
+  activeTabId = newTabId;
+  liveTranslateStatus = newStatus;
+  chrome.storage.local.set({ activeTabId: newTabId, liveTranslateStatus: newStatus });
+}
+
 async function ensureOffscreenDocument() {
   const contexts = await chrome.runtime.getContexts({
     contextTypes: ["OFFSCREEN_DOCUMENT"]
@@ -62,8 +80,7 @@ export default defineBackground(() => {
             }
           });
 
-          activeTabId = targetTabId;
-          liveTranslateStatus = "connecting";
+          updateState(targetTabId, "connecting");
           sendResponse({ ok: true });
         } catch (err: any) {
           console.error("Failed to start live translate offscreen", err);
@@ -80,8 +97,7 @@ export default defineBackground(() => {
           data: { status: "disconnected" }
         });
       }
-      liveTranslateStatus = "disconnected";
-      activeTabId = null;
+      updateState(null, "disconnected");
       chrome.runtime.sendMessage({ type: "liveTranslateOffscreenStop" });
       sendResponse({ ok: true });
       return false;
@@ -112,14 +128,15 @@ export default defineBackground(() => {
     // 當收到 Offscreen 回報的連線狀態，更新後轉發給當前 active 影片分頁與 Popup
     if (message.type === "sendLiveTranslateStatus") {
       const { status } = message.data;
-      liveTranslateStatus = status;
-      // 先轉發給 content script，再清除 activeTabId（避免訊息送不到）
+      // 先轉發給 content script，再更新狀態（避免 activeTabId 先被清空）
       if (activeTabId) {
-        chrome.tabs.sendMessage(activeTabId, message);
+        chrome.tabs.sendMessage(activeTabId, message, () => {
+          // 忽略可能的分頁已關閉錯誤
+          const err = chrome.runtime.lastError;
+        });
       }
-      if (status === "disconnected" || status === "error") {
-        activeTabId = null;
-      }
+      const nextTabId = (status === "disconnected" || status === "error") ? null : activeTabId;
+      updateState(nextTabId, status);
       // 廣播給 Popup (Popup 可以被點開)
       chrome.runtime.sendMessage(message);
       return false;
