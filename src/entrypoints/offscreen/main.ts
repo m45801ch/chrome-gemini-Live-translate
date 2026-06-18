@@ -22,7 +22,34 @@ let liveSourceNode: MediaStreamAudioSourceNode | null = null;
 let liveWorkletNode: AudioWorkletNode | null = null;
 let liveWs: WebSocket | null = null;
 
+let hotSwapInterval: NodeJS.Timeout | null = null;
+let pendingReconnect = false;
+
+function startHotSwapTimer(seconds: number, apiKey: string, targetLang: string) {
+  stopHotSwapTimer();
+  if (seconds <= 0) return;
+
+  console.warn(`[Offscreen] 已啟動熱切換計時器，間隔為 ${seconds} 秒`);
+  hotSwapInterval = setInterval(() => {
+    if (liveWs && (liveWs.readyState === WebSocket.OPEN || liveWs.readyState === WebSocket.CONNECTING)) {
+      console.warn("[Offscreen] 達到熱切換間隔，正在重新建立連線以清空對話快取...");
+      pendingReconnect = true;
+      liveWs.close();
+    }
+  }, seconds * 1000);
+}
+
+function stopHotSwapTimer() {
+  if (hotSwapInterval) {
+    clearInterval(hotSwapInterval);
+    hotSwapInterval = null;
+  }
+}
+
 function stopLiveTranslateCore() {
+  stopHotSwapTimer();
+  pendingReconnect = false;
+
   if (liveWs) {
     liveWs.onclose = null;
     liveWs.onerror = null;
@@ -58,7 +85,7 @@ function stopLiveTranslateCore() {
 // 監聽來自 Background 的訊息
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "liveTranslateOffscreenStart") {
-    const { streamId, apiKey, targetLang } = message.data;
+    const { streamId, apiKey, targetLang, hotSwap } = message.data;
     stopLiveTranslateCore();
 
     // 通知狀態：正在連線
@@ -115,140 +142,164 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       liveSourceNode.connect(liveWorkletNode);
       liveWorkletNode.connect(liveAudioCtx.destination);
 
-      const modelName = "gemini-3.5-live-translate-preview";
-      const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
-      liveWs = new WebSocket(wsUrl);
+      const connectLiveWs = () => {
+        if (liveWs) {
+          liveWs.onclose = null;
+          liveWs.onerror = null;
+          liveWs.onmessage = null;
+          try {
+            liveWs.close();
+          } catch {}
+          liveWs = null;
+        }
 
-      const targetLangBCP47 = mapToBCP47(targetLang);
+        const modelName = "gemini-3.5-live-translate-preview";
+        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+        liveWs = new WebSocket(wsUrl);
 
-      liveWs.onopen = () => {
-        console.warn("[Offscreen] Gemini Live WebSocket opened, sending setup...");
-        const setup = {
-          setup: {
-            model: `models/${modelName}`,
-            generationConfig: {
-              responseModalities: ["AUDIO"],
-              translationConfig: {
-                targetLanguageCode: targetLangBCP47,
+        const targetLangBCP47 = mapToBCP47(targetLang);
+
+        liveWs.onopen = () => {
+          console.warn("[Offscreen] Gemini Live WebSocket opened, sending setup...");
+          const setup = {
+            setup: {
+              model: `models/${modelName}`,
+              generationConfig: {
+                responseModalities: ["AUDIO"],
+                translationConfig: {
+                  targetLanguageCode: targetLangBCP47,
+                },
               },
             },
-          },
+          };
+          liveWs?.send(JSON.stringify(setup));
+          startHotSwapTimer(Number(hotSwap), apiKey, targetLang);
         };
-        liveWs?.send(JSON.stringify(setup));
-      };
 
-      liveWs.onmessage = async (event) => {
-        try {
-          let text = "";
-          if (event.data instanceof Blob) {
-            text = await event.data.text();
-          } else if (event.data instanceof ArrayBuffer) {
-            text = new TextDecoder().decode(event.data);
-          } else if (typeof event.data === "string") {
-            text = event.data;
+        liveWs.onmessage = async (event) => {
+          try {
+            let text = "";
+            if (event.data instanceof Blob) {
+              text = await event.data.text();
+            } else if (event.data instanceof ArrayBuffer) {
+              text = new TextDecoder().decode(event.data);
+            } else if (typeof event.data === "string") {
+              text = event.data;
+            } else {
+              return;
+            }
+
+            const data = JSON.parse(text);
+
+            if (data.setupComplete !== undefined) {
+              console.warn("[Offscreen] Gemini setupComplete received");
+              chrome.runtime.sendMessage({ type: "sendLiveTranslateStatus", data: { status: "connected" } });
+              return;
+            }
+
+            if (data.serverContent) {
+              const sc = data.serverContent;
+              let isFinal = false;
+              let originalText = "";
+              let translationText = "";
+
+              const extract = (item: any): string => {
+                if (!item) return "";
+                if (typeof item === "string") return item;
+                if (typeof item.text === "string") return item.text;
+                if (Array.isArray(item.parts)) {
+                  return item.parts
+                    .filter((p: any) => typeof p.text === "string")
+                    .map((p: any) => p.text)
+                    .join("");
+                }
+                if (Array.isArray(item)) {
+                  return item.map(extract).join("");
+                }
+                return "";
+              };
+
+              if (sc.inputTranscription) {
+                originalText = extract(sc.inputTranscription);
+                if (sc.inputTranscription.finished) {
+                  isFinal = true;
+                }
+              }
+
+              if (sc.outputTranscription) {
+                translationText = extract(sc.outputTranscription);
+                if (sc.outputTranscription.finished) {
+                  isFinal = true;
+                }
+              }
+
+              if (sc.modelTurn) {
+                const textVal = extract(sc.modelTurn);
+                if (textVal && !translationText) {
+                  translationText = textVal;
+                }
+              }
+
+              if (sc.turnComplete) {
+                isFinal = true;
+              }
+
+              if (originalText || translationText || isFinal) {
+                chrome.runtime.sendMessage({
+                  type: "sendLiveTranslationChunk",
+                  data: { original: originalText, translation: translationText, isFinal },
+                });
+              }
+            }
+
+            if (data.error) {
+              console.error("[Offscreen] Gemini error:", data.error);
+              const msg = data.error.message || JSON.stringify(data.error);
+              chrome.runtime.sendMessage({ type: "sendLiveTranslateStatus", data: { status: "error", error: msg } });
+            }
+          } catch (err) {
+            console.error("[Offscreen] Error handling message", err);
+          }
+        };
+
+        liveWs.onerror = (e) => {
+          console.error("[Offscreen] Gemini WebSocket error", e);
+          chrome.runtime.sendMessage({
+            type: "sendLiveTranslateStatus",
+            data: { status: "error", error: "WebSocket 連線錯誤，請確認網路或 API Key 是否正確。" },
+          });
+        };
+
+        liveWs.onclose = (e) => {
+          console.warn("[Offscreen] Gemini WebSocket closed", e.code, e.reason);
+          stopHotSwapTimer();
+          if (pendingReconnect) {
+            pendingReconnect = false;
+            console.warn("[Offscreen] 熱切換定時重新連線中...");
+            setTimeout(() => {
+              connectLiveWs();
+            }, 500);
           } else {
-            return;
-          }
-
-          const data = JSON.parse(text);
-
-          if (data.setupComplete !== undefined) {
-            console.warn("[Offscreen] Gemini setupComplete received");
-            chrome.runtime.sendMessage({ type: "sendLiveTranslateStatus", data: { status: "connected" } });
-            return;
-          }
-
-          if (data.serverContent) {
-            const sc = data.serverContent;
-            let isFinal = false;
-            let originalText = "";
-            let translationText = "";
-
-            const extract = (item: any): string => {
-              if (!item) return "";
-              if (typeof item === "string") return item;
-              if (typeof item.text === "string") return item.text;
-              if (Array.isArray(item.parts)) {
-                return item.parts
-                  .filter((p: any) => typeof p.text === "string")
-                  .map((p: any) => p.text)
-                  .join("");
+            if (e.code !== 1000 && e.code !== 1005) {
+              let errMsg = `連線關閉 (${e.code})`;
+              if (e.code === 1008 || e.reason?.includes("API key not valid")) {
+                errMsg = "API Key 無效或已過期，請重新檢查輸入的金鑰。";
+              } else if (e.code === 1011) {
+                errMsg = "伺服器內部錯誤，請確認 Model 與 API 版本相容性。";
+              } else if (e.code === 1007) {
+                errMsg = "Setup 參數錯誤或格式不合。";
+              } else if (e.reason) {
+                errMsg += `: ${e.reason}`;
               }
-              if (Array.isArray(item)) {
-                return item.map(extract).join("");
-              }
-              return "";
-            };
-
-            if (sc.inputTranscription) {
-              originalText = extract(sc.inputTranscription);
-              if (sc.inputTranscription.finished) {
-                isFinal = true;
-              }
-            }
-
-            if (sc.outputTranscription) {
-              translationText = extract(sc.outputTranscription);
-              if (sc.outputTranscription.finished) {
-                isFinal = true;
-              }
-            }
-
-            if (sc.modelTurn) {
-              const textVal = extract(sc.modelTurn);
-              if (textVal && !translationText) {
-                translationText = textVal;
-              }
-            }
-
-            if (sc.turnComplete) {
-              isFinal = true;
-            }
-
-            if (originalText || translationText || isFinal) {
-              chrome.runtime.sendMessage({
-                type: "sendLiveTranslationChunk",
-                data: { original: originalText, translation: translationText, isFinal },
-              });
+              chrome.runtime.sendMessage({ type: "sendLiveTranslateStatus", data: { status: "error", error: errMsg } });
+            } else {
+              chrome.runtime.sendMessage({ type: "sendLiveTranslateStatus", data: { status: "disconnected" } });
             }
           }
-
-          if (data.error) {
-            console.error("[Offscreen] Gemini error:", data.error);
-            const msg = data.error.message || JSON.stringify(data.error);
-            chrome.runtime.sendMessage({ type: "sendLiveTranslateStatus", data: { status: "error", error: msg } });
-          }
-        } catch (err) {
-          console.error("[Offscreen] Error handling message", err);
-        }
+        };
       };
 
-      liveWs.onerror = (e) => {
-        console.error("[Offscreen] Gemini WebSocket error", e);
-        chrome.runtime.sendMessage({
-          type: "sendLiveTranslateStatus",
-          data: { status: "error", error: "WebSocket 連線錯誤，請確認網路或 API Key 是否正確。" },
-        });
-      };
-
-      liveWs.onclose = (e) => {
-        console.warn("[Offscreen] Gemini WebSocket closed", e.code, e.reason);
-        if (e.code !== 1000 && e.code !== 1005) {
-          let errMsg = `連線關閉 (${e.code})`;
-          if (e.code === 1008 || e.reason?.includes("API key not valid")) {
-            errMsg = "API Key 無效或已過期，請重新檢查輸入的金鑰。";
-          } else if (e.code === 1011) {
-            errMsg = "伺服器內部錯誤，請確認 Model 與 API 版本相容性。";
-          } else if (e.code === 1007) {
-            errMsg = "Setup 參數錯誤或格式不合。";
-          } else if (e.reason) {
-            errMsg += `: ${e.reason}`;
-          }
-          chrome.runtime.sendMessage({ type: "sendLiveTranslateStatus", data: { status: "error", error: errMsg } });
-        } else {
-          chrome.runtime.sendMessage({ type: "sendLiveTranslateStatus", data: { status: "disconnected" } });
-        }
-      };
+      connectLiveWs();
 
       sendResponse({ ok: true });
     }).catch((err) => {

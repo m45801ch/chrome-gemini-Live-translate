@@ -32,6 +32,9 @@ export default defineBackground(() => {
         return true;
       }
 
+      // 先停止舊的 Offscreen 工作階段，釋放舊的音訊串流擷取
+      chrome.runtime.sendMessage({ type: "liveTranslateOffscreenStop" });
+
       chrome.tabCapture.getMediaStreamId({ targetTabId }, async (streamId) => {
         if (!streamId) {
           console.error("Failed to get media stream ID");
@@ -55,6 +58,7 @@ export default defineBackground(() => {
               streamId,
               apiKey: config.apiKey,
               targetLang: config.targetLang,
+              hotSwap: config.hotSwap,
             }
           });
 
@@ -70,6 +74,12 @@ export default defineBackground(() => {
     }
 
     if (message.type === "stopVideoLiveTranslate") {
+      if (activeTabId) {
+        chrome.tabs.sendMessage(activeTabId, {
+          type: "sendLiveTranslateStatus",
+          data: { status: "disconnected" }
+        });
+      }
       liveTranslateStatus = "disconnected";
       activeTabId = null;
       chrome.runtime.sendMessage({ type: "liveTranslateOffscreenStop" });
@@ -101,13 +111,14 @@ export default defineBackground(() => {
 
     // 當收到 Offscreen 回報的連線狀態，更新後轉發給當前 active 影片分頁與 Popup
     if (message.type === "sendLiveTranslateStatus") {
-      const { status, error } = message.data;
+      const { status } = message.data;
       liveTranslateStatus = status;
-      if (status === "disconnected" || status === "error") {
-        activeTabId = null;
-      }
+      // 先轉發給 content script，再清除 activeTabId（避免訊息送不到）
       if (activeTabId) {
         chrome.tabs.sendMessage(activeTabId, message);
+      }
+      if (status === "disconnected" || status === "error") {
+        activeTabId = null;
       }
       // 廣播給 Popup (Popup 可以被點開)
       chrome.runtime.sendMessage(message);

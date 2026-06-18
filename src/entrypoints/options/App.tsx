@@ -42,11 +42,13 @@ const App: React.FC = () => {
   const [apiKey, setApiKey] = useState<string>("");
   const [sourceLang, setSourceLang] = useState<string>("auto");
   const [targetLang, setTargetLang] = useState<string>("zh-Hant");
+  const [hotSwap, setHotSwap] = useState<number>(90);
 
   useEffect(() => {
     getLiveTranslateConfig().then((config) => {
       setApiKey(config.apiKey);
       setTargetLang(config.targetLang);
+      setHotSwap(config.hotSwap);
       // 擴充套件可能沒有存 sourceLang，如果有的話讀取
       const anyConfig = config as any;
       if (anyConfig.sourceLang) {
@@ -68,6 +70,11 @@ const App: React.FC = () => {
   const handleTargetLangChange = (val: string) => {
     setTargetLang(val);
     saveLiveTranslateConfig({ targetLang: val });
+  };
+
+  const handleHotSwapChange = (val: number) => {
+    setHotSwap(val);
+    saveLiveTranslateConfig({ hotSwap: val });
   };
 
   return (
@@ -153,7 +160,7 @@ const App: React.FC = () => {
             <div style={settingsGroupStyle}>
               <div style={cardHeaderStyle}>
                 <h3 style={cardTitleStyle}>語音翻譯語言</h3>
-                <p style={cardSubTitleStyle}>選擇即時翻譯的影片語音來源，以及翻譯呈現的字幕目標語言。</p>
+                <p style={cardSubTitleStyle}>選擇即時翻譯的影片語音來源，以及翻譯呈現的字幕目標語言與快取設定。</p>
               </div>
 
               <div style={{ display: "flex", flexDirection: "column", gap: "20px", marginTop: "20px" }}>
@@ -187,6 +194,22 @@ const App: React.FC = () => {
                     ))}
                   </select>
                   <span style={tipStyle}>* 即時翻譯產出的字幕目標語系，預設為繁體中文。</span>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  <label style={labelStyle}>清理快取對話間隔 (防止延遲)</label>
+                  <select
+                    value={hotSwap}
+                    onChange={(e) => handleHotSwapChange(Number(e.target.value))}
+                    style={selectStyle}
+                  >
+                    <option value={30}>30 秒</option>
+                    <option value={60}>60 秒</option>
+                    <option value={90}>90 秒（預設）</option>
+                    <option value={120}>120 秒</option>
+                    <option value={0}>不清理</option>
+                  </select>
+                  <span style={tipStyle}>* 定期重新建立連線以清空語音模型上下文快取，防止因對話過長導致的反應延遲。</span>
                 </div>
               </div>
             </div>

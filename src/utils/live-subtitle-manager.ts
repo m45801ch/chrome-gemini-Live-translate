@@ -9,9 +9,10 @@ export class LiveSubtitleManager {
   private maxLines = 3
   private history: SubtitleEntry[] = []
   private showOriginal = true
+  private displayMode: "both" | "original" | "translation" = "both"
 
   // Callbacks
-  onSubtitleUpdate: (data: { original: string, translation: string }) => void = () => {}
+  onSubtitleUpdate: (data: { original: string, translation: string, entries: { original: string, translation: string }[] }) => void = () => {}
 
   constructor({ maxLines, showOriginal }: { maxLines?: number, showOriginal?: boolean } = {}) {
     if (maxLines !== undefined)
@@ -20,8 +21,15 @@ export class LiveSubtitleManager {
       this.showOriginal = showOriginal
   }
 
+  setDisplayMode(mode: "both" | "original" | "translation") {
+    this.displayMode = mode
+    this._trimHistory()
+    this._notify()
+  }
+
   setMaxLines(n: number) {
     this.maxLines = Math.max(1, Math.min(10, n))
+    this._trimHistory()
     this._notify()
   }
 
@@ -109,7 +117,31 @@ export class LiveSubtitleManager {
   }
 
   private _trimHistory() {
-    while (this.history.length > this.maxLines) {
+    let totalLines = 0
+    let keepCount = 0
+
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const entry = this.history[i]
+      let linesInEntry = 0
+      if (this.displayMode === "both") {
+        if (entry.original.trim()) linesInEntry++
+        if (entry.translation.trim()) linesInEntry++
+      } else if (this.displayMode === "original") {
+        if (entry.original.trim()) linesInEntry++
+      } else {
+        if (entry.translation.trim()) linesInEntry++
+      }
+      
+      // Ensure we keep at least 1 entry
+      if (totalLines + linesInEntry <= this.maxLines || keepCount === 0) {
+        totalLines += linesInEntry
+        keepCount++
+      } else {
+        break
+      }
+    }
+
+    while (this.history.length > keepCount) {
       this.history.shift()
     }
   }
@@ -120,22 +152,31 @@ export class LiveSubtitleManager {
     )
 
     const originalText = this.showOriginal
-      ? activeEntries.map(e => e.original.trim()).filter(Boolean).join("\n")
+      ? activeEntries.map(e => e.original.trim()).filter(Boolean).join(" ")
       : ""
 
     const translationText = activeEntries
       .map(e => e.translation.trim())
       .filter(Boolean)
-      .join("\n")
+      .join(" ")
 
     this.onSubtitleUpdate({
       original: originalText,
       translation: translationText,
+      entries: activeEntries.map(e => ({
+        original: this.showOriginal ? e.original.trim() : "",
+        translation: e.translation.trim()
+      }))
     })
   }
 
   clear() {
     this.history = []
     this._notify()
+  }
+
+  /** 清除歷史紀錄但不觸發 onSubtitleUpdate，避免在新語音到達前插入空白更新 */
+  clearSilent() {
+    this.history = []
   }
 }

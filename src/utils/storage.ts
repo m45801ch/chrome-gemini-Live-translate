@@ -17,6 +17,7 @@ export interface SubtitleStyle {
 export interface AppConfig {
   apiKey: string;
   targetLang: string;
+  hotSwap: number; // 30, 60, 90, 120, 0
   subtitleStyle: SubtitleStyle;
 }
 
@@ -40,10 +41,11 @@ const DEFAULT_STYLE: SubtitleStyle = {
 };
 
 export async function getLiveTranslateConfig(): Promise<AppConfig> {
-  const data = await chrome.storage.local.get(["apiKey", "targetLang", "subtitleStyle"]);
+  const data = await chrome.storage.local.get(["apiKey", "targetLang", "hotSwap", "subtitleStyle"]);
   return {
     apiKey: data.apiKey || "",
     targetLang: data.targetLang || "zh-Hant",
+    hotSwap: data.hotSwap !== undefined ? Number(data.hotSwap) : 90,
     subtitleStyle: {
       ...DEFAULT_STYLE,
       ...data.subtitleStyle,

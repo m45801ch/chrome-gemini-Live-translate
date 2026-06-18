@@ -27,6 +27,7 @@ export default defineContentScript({
 interface SubtitleChunk {
   original: string;
   translation: string;
+  entries?: { original: string; translation: string }[];
 }
 
 function setupVideoElementsWatcher() {
@@ -127,6 +128,26 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
   const [verticalPercent, setVerticalPercent] = useState(10);
   const [isDragging, setIsDragging] = useState(false);
   const [status, setStatus] = useState("disconnected");
+  const dragStartRef = useRef<{ startY: number; startPercent: number } | null>(null);
+
+  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // 用 ref 儲存最新的 setter，讓靜音計時器 callback 能安全呼叫
+  const subtitleSetterForSilenceRef = useRef(setSubtitle);
+  subtitleSetterForSilenceRef.current = setSubtitle;
+  const needsClearRef = useRef(false);
+
+  const resetSilenceTimerRef = useRef<() => void>(() => {});
+  resetSilenceTimerRef.current = () => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+    }
+    silenceTimerRef.current = setTimeout(() => {
+      // 靜音 7 秒：清除字幕顯示與歷史，等下次語音再出現
+      managerRef.current?.clearSilent();
+      subtitleSetterForSilenceRef.current(null);
+      needsClearRef.current = true;
+    }, 7000);
+  };
 
   // ref 保存最新值，避免 listener 內 stale closure
   const activeRef = useRef(false);
@@ -138,9 +159,9 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
   const managerRef = useRef<LiveSubtitleManager | null>(null);
   if (!managerRef.current) {
     managerRef.current = new LiveSubtitleManager({ maxLines: 3, showOriginal: true });
-    managerRef.current.onSubtitleUpdate = ({ original, translation }) => {
-      console.log("[VLT] subtitle update:", { original, translation });
-      subtitleSetterRef.current({ original, translation });
+    managerRef.current.onSubtitleUpdate = ({ original, translation, entries }) => {
+      console.log("[VLT] subtitle update:", { original, translation, entries });
+      subtitleSetterRef.current({ original, translation, entries });
     };
   }
 
@@ -150,6 +171,7 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
       console.log("[VLT] Config loaded:", loaded);
       configRef.current = loaded;
       setConfig(loaded);
+      managerRef.current?.setDisplayMode(loaded.subtitleStyle.displayMode);
       managerRef.current?.setMaxLines(loaded.subtitleStyle.maxLines);
     });
   }, []);
@@ -163,6 +185,9 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
         activeRef.current = res.active;
         setActive(res.active);
         setStatus(res.status);
+        if (res.active) {
+          resetSilenceTimerRef.current();
+        }
       }
     });
 
@@ -170,6 +195,13 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
       if (message.type === "sendLiveTranslationChunk") {
         const { original, translation, isFinal } = message.data;
         console.log("[VLT] chunk received, active:", activeRef.current, { original, translation });
+        
+        // 僅在靜音後第一個 chunk 才額外清空歷史（避免帶入舊對話）
+        if (needsClearRef.current) {
+          managerRef.current?.clearSilent();
+          needsClearRef.current = false;
+        }
+        resetSilenceTimerRef.current();
         managerRef.current?.addChunk({ original, translation, isFinal });
 
       } else if (message.type === "sendLiveTranslateStatus") {
@@ -182,6 +214,12 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
         if (!isActive) {
           subtitleSetterRef.current(null);
           managerRef.current?.clear();
+          if (silenceTimerRef.current) {
+            clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = null;
+          }
+        } else {
+          resetSilenceTimerRef.current();
         }
       }
     };
@@ -194,28 +232,49 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
         getLiveTranslateConfig().then((loaded) => {
           configRef.current = loaded;
           setConfig(loaded);
+          managerRef.current?.setDisplayMode(loaded.subtitleStyle.displayMode);
           managerRef.current?.setMaxLines(loaded.subtitleStyle.maxLines);
         });
       }
     };
     chrome.storage.onChanged.addListener(handleStorageChange);
 
-    // 注意：不 return cleanup，listener 永久存活（隨 shadow DOM 一起銷毀）
-    // 若需要 cleanup 也可以，但不能每次 config 變就 remove
+    return () => {
+      chrome.runtime.onMessage.removeListener(handleMessage);
+      chrome.storage.onChanged.removeListener(handleStorageChange);
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+      }
+    };
   }, []); // ← 只掛一次！
 
   // 拖曳
   const handleMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
+    dragStartRef.current = {
+      startY: e.clientY,
+      startPercent: verticalPercent,
+    };
     setIsDragging(true);
   };
 
   useEffect(() => {
     if (!isDragging) return;
+
+    // 拖曳時在整個頁面鎖定 cursor 與文字選取，避免滑出字幕框後 cursor 恢復預設
+    const prevCursor = document.body.style.cursor;
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "grabbing";
+    document.body.style.userSelect = "none";
+
     const onMove = (e: MouseEvent) => {
+      if (!dragStartRef.current) return;
       const rect = playerContainer.getBoundingClientRect();
-      const relativeY = rect.bottom - e.clientY;
-      const percent = Math.max(5, Math.min(85, (relativeY / rect.height) * 100));
+      const deltaY = e.clientY - dragStartRef.current.startY;
+      // 往上拖曳（deltaY < 0）時，高度百分比應增加
+      const deltaPercent = -(deltaY / rect.height) * 100;
+      const nextPercent = dragStartRef.current.startPercent + deltaPercent;
+      const percent = Math.max(5, Math.min(85, nextPercent));
       setVerticalPercent(percent);
     };
     const onUp = () => setIsDragging(false);
@@ -224,6 +283,8 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
     return () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevUserSelect;
     };
   }, [isDragging]);
 
@@ -235,13 +296,17 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
   const { subtitleStyle } = config;
   const isLeftAlign = subtitleStyle.textAlign === "left";
 
+  const mainFontSize = (subtitleStyle.main.fontScale / 100) * 22;
+  const transFontSize = (subtitleStyle.translation.fontScale / 100) * 22;
+
   const containerStyle: React.CSSProperties = {
     position: "absolute",
-    left: "50%",
-    transform: "translateX(-50%)",
+    left: "0",
+    right: "0",
+    margin: "0 auto",
     bottom: `${verticalPercent}%`,
     width: "fit-content",
-    maxWidth: "85%",
+    maxWidth: "80%",
     backgroundColor: `rgba(15, 23, 42, ${subtitleStyle.backgroundOpacity / 100})`,
     borderRadius: "10px",
     padding: "10px 18px",
@@ -258,33 +323,90 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
     textAlign: isLeftAlign ? "left" : "center",
   };
 
+  const mainBlockStyle: React.CSSProperties = {
+    maxHeight: `${subtitleStyle.maxLines * 1.4 * mainFontSize}px`,
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "flex-end",
+    alignItems: isLeftAlign ? "flex-start" : "center",
+    width: "100%",
+  };
+
+  const transBlockStyle: React.CSSProperties = {
+    maxHeight: `${subtitleStyle.maxLines * 1.4 * transFontSize}px`,
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "flex-end",
+    alignItems: isLeftAlign ? "flex-start" : "center",
+    width: "100%",
+  };
+
   const mainStyle: React.CSSProperties = {
     fontFamily: FONT_FAMILIES[subtitleStyle.main.fontFamily] ?? FONT_FAMILIES.system,
-    fontSize: `${(subtitleStyle.main.fontScale / 100) * 22}px`,
+    fontSize: `${mainFontSize}px`,
     color: subtitleStyle.main.color,
     fontWeight: subtitleStyle.main.fontWeight,
     lineHeight: "1.4",
     textShadow: "1px 1px 3px rgba(0,0,0,0.9)",
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+    flexShrink: 0,
   };
 
   const transStyle: React.CSSProperties = {
     fontFamily: FONT_FAMILIES[subtitleStyle.translation.fontFamily] ?? FONT_FAMILIES.system,
-    fontSize: `${(subtitleStyle.translation.fontScale / 100) * 22}px`,
+    fontSize: `${transFontSize}px`,
     color: subtitleStyle.translation.color,
     fontWeight: subtitleStyle.translation.fontWeight,
     lineHeight: "1.4",
     textShadow: "1px 1px 3px rgba(0,0,0,0.9)",
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+    flexShrink: 0,
   };
 
+  const entries = subtitle.entries || [
+    { original: subtitle.original, translation: subtitle.translation },
+  ];
+
   return (
-    <div style={containerStyle} onMouseDown={handleMouseDown} title="拖曳可調整字幕高度">
-      {config.subtitleStyle.displayMode !== "translation" && subtitle.original && (
-        <div style={mainStyle}>{subtitle.original}</div>
+    <>
+      {isDragging && (
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            width: "100%",
+            height: "100%",
+            cursor: "grabbing",
+            zIndex: 2147483647,
+            pointerEvents: "auto",
+            backgroundColor: "transparent",
+          }}
+        />
       )}
-      {config.subtitleStyle.displayMode !== "original" && subtitle.translation && (
-        <div style={transStyle}>{subtitle.translation}</div>
-      )}
-    </div>
+      <div style={containerStyle} onMouseDown={handleMouseDown} title="拖曳可調整字幕高度">
+        {config.subtitleStyle.displayMode !== "translation" && subtitle.original && (
+          <div style={mainBlockStyle}>
+            {entries.map((entry, idx) => entry.original && (
+              <div key={idx} style={mainStyle}>{entry.original}</div>
+            ))}
+          </div>
+        )}
+        {config.subtitleStyle.displayMode !== "original" && subtitle.translation && (
+          <div style={transBlockStyle}>
+            {entries.map((entry, idx) => entry.translation && (
+              <div key={idx} style={transStyle}>{entry.translation}</div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
   );
 };
 
