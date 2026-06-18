@@ -77,6 +77,7 @@ export default defineBackground(() => {
               apiKey: config.apiKey,
               targetLang: config.targetLang,
               hotSwap: config.hotSwap,
+              modelName: config.modelName,
             }
           });
 

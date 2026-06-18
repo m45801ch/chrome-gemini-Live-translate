@@ -40,6 +40,7 @@ const LANGUAGES = [
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<"api" | "lang" | "subtitle">("api");
   const [apiKey, setApiKey] = useState<string>("");
+  const [modelName, setModelName] = useState<string>("gemini-3.5-live-translate-preview");
   const [sourceLang, setSourceLang] = useState<string>("auto");
   const [targetLang, setTargetLang] = useState<string>("zh-Hant");
   const [hotSwap, setHotSwap] = useState<number>(90);
@@ -47,6 +48,7 @@ const App: React.FC = () => {
   useEffect(() => {
     getLiveTranslateConfig().then((config) => {
       setApiKey(config.apiKey);
+      setModelName(config.modelName || "gemini-3.5-live-translate-preview");
       setTargetLang(config.targetLang);
       setHotSwap(config.hotSwap);
       // 擴充套件可能沒有存 sourceLang，如果有的話讀取
@@ -60,6 +62,11 @@ const App: React.FC = () => {
   const handleApiKeyChange = (val: string) => {
     setApiKey(val);
     saveLiveTranslateConfig({ apiKey: val });
+  };
+
+  const handleModelNameChange = (val: string) => {
+    setModelName(val);
+    saveLiveTranslateConfig({ modelName: val });
   };
 
   const handleSourceLangChange = (val: string) => {
@@ -152,6 +159,18 @@ const App: React.FC = () => {
                     前往獲取 API Key
                   </button>
                 </div>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "20px" }}>
+                <label style={labelStyle}>自訂模型名稱 (Gemini Live Model)</label>
+                <input
+                  type="text"
+                  placeholder="預設為 gemini-3.5-live-translate-preview"
+                  value={modelName}
+                  onChange={(e) => handleModelNameChange(e.target.value)}
+                  style={inputStyle}
+                />
+                <span style={tipStyle}>* 當 Google 推出新版即時翻譯模型（例如 Gemini 4.0 Live）時，您可以在此輸入新的模型名稱。</span>
               </div>
             </div>
           )}

@@ -85,7 +85,7 @@ function stopLiveTranslateCore() {
 // 監聽來自 Background 的訊息
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "liveTranslateOffscreenStart") {
-    const { streamId, apiKey, targetLang, hotSwap } = message.data;
+    const { streamId, apiKey, targetLang, hotSwap, modelName: incomingModelName } = message.data;
     stopLiveTranslateCore();
 
     // 通知狀態：正在連線
@@ -153,7 +153,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           liveWs = null;
         }
 
-        const modelName = "gemini-3.5-live-translate-preview";
+        const finalModelName = incomingModelName || "gemini-3.5-live-translate-preview";
         const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
         liveWs = new WebSocket(wsUrl);
 
@@ -163,7 +163,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           console.warn("[Offscreen] Gemini Live WebSocket opened, sending setup...");
           const setup = {
             setup: {
-              model: `models/${modelName}`,
+              model: `models/${finalModelName}`,
               generationConfig: {
                 responseModalities: ["AUDIO"],
                 translationConfig: {
