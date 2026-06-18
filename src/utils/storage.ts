@@ -1,0 +1,65 @@
+export interface SubtitleTextStyle {
+  fontFamily: "system" | "roboto" | "noto-sans" | "noto-serif";
+  fontScale: number; // 30 到 150 %
+  color: string;
+  fontWeight: number; // 300 到 700
+}
+
+export interface SubtitleStyle {
+  textAlign: "center" | "left";
+  maxLines: number;
+  backgroundOpacity: number; // 0 到 100
+  displayMode: "both" | "original" | "translation";
+  main: SubtitleTextStyle;
+  translation: SubtitleTextStyle;
+}
+
+export interface AppConfig {
+  apiKey: string;
+  targetLang: string;
+  subtitleStyle: SubtitleStyle;
+}
+
+const DEFAULT_STYLE: SubtitleStyle = {
+  textAlign: "center",
+  maxLines: 3,
+  backgroundOpacity: 75,
+  displayMode: "both",
+  main: {
+    fontFamily: "system",
+    fontScale: 100,
+    color: "#ffffff",
+    fontWeight: 400,
+  },
+  translation: {
+    fontFamily: "system",
+    fontScale: 110,
+    color: "#ffeb3b",
+    fontWeight: 400,
+  },
+};
+
+export async function getLiveTranslateConfig(): Promise<AppConfig> {
+  const data = await chrome.storage.local.get(["apiKey", "targetLang", "subtitleStyle"]);
+  return {
+    apiKey: data.apiKey || "",
+    targetLang: data.targetLang || "zh-Hant",
+    subtitleStyle: {
+      ...DEFAULT_STYLE,
+      ...data.subtitleStyle,
+      main: {
+        ...DEFAULT_STYLE.main,
+        ...(data.subtitleStyle?.main || {}),
+      },
+      translation: {
+        ...DEFAULT_STYLE.translation,
+        ...(data.subtitleStyle?.translation || {}),
+      },
+    },
+  };
+}
+
+export async function saveLiveTranslateConfig(config: Partial<AppConfig>): Promise<void> {
+  await chrome.storage.local.set(config);
+}
+
