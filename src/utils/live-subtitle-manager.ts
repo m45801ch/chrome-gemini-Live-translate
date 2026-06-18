@@ -117,24 +117,31 @@ export class LiveSubtitleManager {
   }
 
   private _trimHistory() {
-    let totalLines = 0
+    let originalLines = 0
+    let translationLines = 0
     let keepCount = 0
 
     for (let i = this.history.length - 1; i >= 0; i--) {
       const entry = this.history[i]
-      let linesInEntry = 0
-      if (this.displayMode === "both") {
-        if (entry.original.trim()) linesInEntry++
-        if (entry.translation.trim()) linesInEntry++
-      } else if (this.displayMode === "original") {
-        if (entry.original.trim()) linesInEntry++
-      } else {
-        if (entry.translation.trim()) linesInEntry++
+      const hasOriginal = entry.original.trim() ? 1 : 0
+      const hasTranslation = entry.translation.trim() ? 1 : 0
+
+      let nextOriginalLines = originalLines
+      let nextTranslationLines = translationLines
+
+      if (this.displayMode === "both" || this.displayMode === "original") {
+        nextOriginalLines += hasOriginal
       }
-      
-      // Ensure we keep at least 1 entry
-      if (totalLines + linesInEntry <= this.maxLines || keepCount === 0) {
-        totalLines += linesInEntry
+      if (this.displayMode === "both" || this.displayMode === "translation") {
+        nextTranslationLines += hasTranslation
+      }
+
+      const originalOk = (this.displayMode === "translation") || (nextOriginalLines <= this.maxLines)
+      const translationOk = (this.displayMode === "original") || (nextTranslationLines <= this.maxLines)
+
+      if ((originalOk && translationOk) || keepCount === 0) {
+        originalLines = nextOriginalLines
+        translationLines = nextTranslationLines
         keepCount++
       } else {
         break
