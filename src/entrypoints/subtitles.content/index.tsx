@@ -2,9 +2,10 @@ import { defineContentScript } from "#imports"
 import React, { useRef, useState, useEffect, useCallback } from "react"
 import ReactDOM from "react-dom/client"
 import { createPortal } from "react-dom"
-import { getLiveTranslateConfig, AppConfig } from "@/utils/storage"
+import { getLiveTranslateConfig, saveLiveTranslateConfig, AppConfig } from "@/utils/storage"
 import { LiveSubtitleManager } from "@/utils/live-subtitle-manager"
 import { SettingsPanel } from "@/components/SettingsPanel"
+import { googleTranslate, microsoftTranslate } from "@/utils/free-translator"
 
 declare global {
   interface Window {
@@ -121,8 +122,18 @@ const FONT_FAMILIES: Record<string, string> = {
 
 // ─── SubtitleRenderer ────────────────────────────────────────────────────────
 // 重點：listener 只掛一次，用 ref 保存最新狀態，避免 stale closure / listener 重建丟 chunk
+const setYouTubeSubtitlesState = (playerContainer: HTMLElement, enable: boolean) => {
+  const ccBtn = playerContainer.querySelector(".ytp-subtitles-button") as HTMLElement;
+  if (!ccBtn) return;
+  const isPressed = ccBtn.getAttribute("aria-pressed") === "true";
+  if (enable !== isPressed) {
+    ccBtn.click();
+  }
+};
+
 const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerContainer }) => {
   const [subtitle, setSubtitle] = useState<SubtitleChunk | null>(null);
+  const [builtInSubtitle, setBuiltInSubtitle] = useState<SubtitleChunk | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [active, setActive] = useState(false);
   const [verticalPercent, setVerticalPercent] = useState(10);
@@ -173,8 +184,136 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
       setConfig(loaded);
       managerRef.current?.setDisplayMode(loaded.subtitleStyle.displayMode);
       managerRef.current?.setMaxLines(loaded.subtitleStyle.maxLines);
+      if (loaded.useBuiltInSubtitles) {
+        setYouTubeSubtitlesState(playerContainer, true);
+      }
     });
   }, []);
+
+  // 監聽內建字幕的變更與翻譯
+  useEffect(() => {
+    if (!config?.useBuiltInSubtitles) {
+      setBuiltInSubtitle(null);
+      return;
+    }
+
+    let observer: MutationObserver | null = null;
+    let debounceTimer: NodeJS.Timeout | null = null;
+    let lastText = "";
+
+    const startObserving = () => {
+      const targetContainer = playerContainer.querySelector(".ytp-caption-window-container");
+      if (!targetContainer) return false;
+
+      observer = new MutationObserver(() => {
+        const segments = playerContainer.querySelectorAll(".ytp-caption-segment");
+        const currentText = Array.from(segments)
+          .map(s => s.textContent || "")
+          .join(" ")
+          .trim();
+
+        if (!currentText) {
+          if (debounceTimer) clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(() => {
+            lastText = "";
+            setBuiltInSubtitle(null);
+          }, 800);
+          return;
+        }
+
+        if (currentText !== lastText) {
+          if (debounceTimer) clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(async () => {
+            lastText = currentText;
+
+            if (config.subtitleStyle.displayMode === "original") {
+              setBuiltInSubtitle({
+                original: currentText,
+                translation: "",
+                entries: [{ original: currentText, translation: "" }]
+              });
+              return;
+            }
+
+            try {
+              let translated = "";
+              const provider = config.builtInTranslator || "google";
+              const target = config.targetLang || "zh-Hant";
+
+              if (provider === "microsoft") {
+                translated = await microsoftTranslate(currentText, "auto", target);
+              } else {
+                translated = await googleTranslate(currentText, "auto", target);
+              }
+
+              setBuiltInSubtitle({
+                original: currentText,
+                translation: translated,
+                entries: [{ original: currentText, translation: translated }]
+              });
+            } catch (err) {
+              console.error("[VLT] Built-in subtitle translation failed:", err);
+              setBuiltInSubtitle({
+                original: currentText,
+                translation: "[翻譯失敗]",
+                entries: [{ original: currentText, translation: "[翻譯失敗]" }]
+              });
+            }
+          }, 400);
+        }
+      });
+
+      observer.observe(targetContainer, {
+        childList: true,
+        subtree: true,
+        characterData: true
+      });
+
+      return true;
+    };
+
+    if (!startObserving()) {
+      const interval = setInterval(() => {
+        if (startObserving()) {
+          clearInterval(interval);
+        }
+      }, 1000);
+      return () => {
+        clearInterval(interval);
+        if (observer) observer.disconnect();
+        if (debounceTimer) clearTimeout(debounceTimer);
+      };
+    }
+
+    return () => {
+      if (observer) observer.disconnect();
+      if (debounceTimer) clearTimeout(debounceTimer);
+    };
+  }, [config?.useBuiltInSubtitles, config?.builtInTranslator, config?.targetLang, config?.subtitleStyle.displayMode, playerContainer]);
+
+  // 動態顯示與隱藏原生 YouTube 字幕
+  useEffect(() => {
+    const styleId = "hide-native-yt-captions";
+    let styleEl = document.getElementById(styleId);
+
+    if (config?.useBuiltInSubtitles) {
+      if (!styleEl) {
+        styleEl = document.createElement("style");
+        styleEl.id = styleId;
+        styleEl.textContent = ".ytp-caption-window-container { opacity: 0 !important; }";
+        document.head.appendChild(styleEl);
+      }
+    } else {
+      if (styleEl) {
+        styleEl.remove();
+      }
+    }
+
+    return () => {
+      const el = document.getElementById(styleId);
+      if (el) el.remove();
+    };
+  }, [config?.useBuiltInSubtitles]);
 
   // 監聽訊息 ─ 只掛一次，永不 remove 再 add
   useEffect(() => {
@@ -228,12 +367,15 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
 
     // storage 更新
     const handleStorageChange = (changes: any) => {
-      if (changes.subtitleStyle) {
+      if (changes.subtitleStyle || changes.useBuiltInSubtitles || changes.builtInTranslator) {
         getLiveTranslateConfig().then((loaded) => {
           configRef.current = loaded;
           setConfig(loaded);
           managerRef.current?.setDisplayMode(loaded.subtitleStyle.displayMode);
           managerRef.current?.setMaxLines(loaded.subtitleStyle.maxLines);
+          if (changes.useBuiltInSubtitles) {
+            setYouTubeSubtitlesState(playerContainer, loaded.useBuiltInSubtitles === true);
+          }
         });
       }
     };
@@ -246,7 +388,7 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
         clearTimeout(silenceTimerRef.current);
       }
     };
-  }, []); // ← 只掛一次！
+  }, [playerContainer]); // ← 只掛一次！
 
   // 拖曳
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -289,7 +431,12 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
   }, [isDragging]);
 
   // 不渲染的條件
-  if (!config || !active || (!subtitle?.original && !subtitle?.translation)) {
+  const displaySubtitle = config?.useBuiltInSubtitles ? builtInSubtitle : subtitle;
+  const isShowing = config?.useBuiltInSubtitles
+    ? (config.useBuiltInSubtitles && !!builtInSubtitle && (!!builtInSubtitle.original || !!builtInSubtitle.translation))
+    : (active && !!subtitle && (!!subtitle.original || !!subtitle.translation));
+
+  if (!config || !isShowing || !displaySubtitle) {
     return null;
   }
 
@@ -367,8 +514,8 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
     flexShrink: 0,
   };
 
-  const entries = subtitle.entries || [
-    { original: subtitle.original, translation: subtitle.translation },
+  const entries = displaySubtitle.entries || [
+    { original: displaySubtitle.original, translation: displaySubtitle.translation },
   ];
 
   return (
@@ -391,14 +538,14 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
         />
       )}
       <div style={containerStyle} onMouseDown={handleMouseDown} title="拖曳可調整字幕高度">
-        {config.subtitleStyle.displayMode !== "translation" && subtitle.original && (
+        {config.subtitleStyle.displayMode !== "translation" && displaySubtitle.original && (
           <div style={mainBlockStyle}>
             {entries.map((entry, idx) => entry.original && (
               <div key={idx} style={mainStyle}>{entry.original}</div>
             ))}
           </div>
         )}
-        {config.subtitleStyle.displayMode !== "original" && subtitle.translation && (
+        {config.subtitleStyle.displayMode !== "original" && displaySubtitle.translation && (
           <div style={transBlockStyle}>
             {entries.map((entry, idx) => entry.translation && (
               <div key={idx} style={transStyle}>{entry.translation}</div>
@@ -446,6 +593,7 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
   const [view, setView] = useState<"main" | "style">("main");
   const [active, setActive] = useState(false);
   const [status, setStatus] = useState("disconnected");
+  const [config, setConfig] = useState<AppConfig | null>(null);
 
   useEffect(() => {
     chrome.runtime.sendMessage({ type: "getLiveTranslateState" }, (res) => {
@@ -461,6 +609,18 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
     };
     chrome.runtime.onMessage.addListener(handleMessage);
     return () => chrome.runtime.onMessage.removeListener(handleMessage);
+  }, []);
+
+  useEffect(() => {
+    getLiveTranslateConfig().then(setConfig);
+
+    const handleStorageChange = (changes: any) => {
+      if (changes.useBuiltInSubtitles || changes.builtInTranslator || changes.subtitleStyle) {
+        getLiveTranslateConfig().then(setConfig);
+      }
+    };
+    chrome.storage.onChanged.addListener(handleStorageChange);
+    return () => chrome.storage.onChanged.removeListener(handleStorageChange);
   }, []);
 
   const menuRef = useRef<HTMLDivElement>(null);
@@ -488,6 +648,33 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
     };
   }, [showMenu]);
 
+  const checkBuiltInSubtitlesAvailable = () => {
+    const ccBtn = playerContainer.querySelector(".ytp-subtitles-button") as HTMLElement;
+    return !!ccBtn && window.getComputedStyle(ccBtn).display !== "none";
+  };
+
+  const handleUseBuiltInChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const enable = e.target.checked;
+    if (enable) {
+      if (!checkBuiltInSubtitlesAvailable()) {
+        alert("該影片無內建字幕，請使用即時翻譯功能");
+        return;
+      }
+      await saveLiveTranslateConfig({ useBuiltInSubtitles: true });
+      setYouTubeSubtitlesState(playerContainer, true);
+      // 兩者只能擇一：停用即時翻譯
+      if (active) {
+        chrome.runtime.sendMessage({ type: "stopVideoLiveTranslate" }, () => {
+          setActive(false);
+          setStatus("disconnected");
+        });
+      }
+    } else {
+      await saveLiveTranslateConfig({ useBuiltInSubtitles: false });
+      setYouTubeSubtitlesState(playerContainer, false);
+    }
+  };
+
   const handleToggle = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (active) {
@@ -495,6 +682,10 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
         setActive(false); setStatus("disconnected");
       });
     } else {
+      // 兩者只能擇一：停用內建字幕
+      saveLiveTranslateConfig({ useBuiltInSubtitles: false });
+      setYouTubeSubtitlesState(playerContainer, false);
+
       setStatus("connecting");
       chrome.runtime.sendMessage({ type: "startVideoLiveTranslate" }, (res) => {
         if (res && !res.ok) {
@@ -611,6 +802,37 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
               <div style={{ display: "flex", alignItems: "center", gap: "6px", justifyContent: "center" }}>
                 <div style={{ width: "7px", height: "7px", borderRadius: "50%", backgroundColor: statusColor, boxShadow: status === "connected" ? `0 0 6px ${statusColor}` : "none" }} />
                 <span style={{ fontSize: "11px", color: "#64748b" }}>{statusText}</span>
+              </div>
+
+              {/* 使用影片內建字幕 */}
+              <div
+                style={{
+                  width: "100%",
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "10px",
+                  padding: "10px 12px",
+                  backgroundColor: "#f8fafc",
+                  color: "#475569",
+                  fontSize: "12px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  boxSizing: "border-box",
+                }}
+              >
+                <span style={{ fontWeight: "500" }}>使用影片內建字幕</span>
+                <input
+                  type="checkbox"
+                  checked={config?.useBuiltInSubtitles === true}
+                  onChange={handleUseBuiltInChange}
+                  style={{
+                    cursor: "pointer",
+                    width: "16px",
+                    height: "16px",
+                    accentColor: "#0284c7",
+                    margin: 0,
+                  }}
+                />
               </div>
 
               {/* 字幕樣式入口 */}

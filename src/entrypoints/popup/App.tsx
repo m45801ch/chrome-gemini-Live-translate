@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
-import { getLiveTranslateConfig } from "@/utils/storage";
+import { getLiveTranslateConfig, saveLiveTranslateConfig } from "@/utils/storage";
 import { IconSettings, IconVideo, IconPlayerPlay, IconPlayerStop, IconCircleDot } from "@tabler/icons-react";
 
 const App: React.FC = () => {
@@ -8,6 +8,18 @@ const App: React.FC = () => {
   const [isActive, setIsActive] = useState<boolean>(false);
   const [status, setStatus] = useState<string>("disconnected");
   const [errorMsg, setErrorMsg] = useState<string>("");
+  const [builtInTranslator, setBuiltInTranslator] = useState<"google" | "microsoft">("google");
+
+  useEffect(() => {
+    getLiveTranslateConfig().then((config) => {
+      setBuiltInTranslator(config.builtInTranslator || "google");
+    });
+  }, []);
+
+  const handleTranslatorChange = (val: "google" | "microsoft") => {
+    setBuiltInTranslator(val);
+    saveLiveTranslateConfig({ builtInTranslator: val });
+  };
 
   useEffect(() => {
     // 獲取當前分頁 ID
@@ -143,6 +155,29 @@ const App: React.FC = () => {
           </div>
 
           {errorMsg && <div style={errorCardStyle}>{errorMsg}</div>}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "4px", marginBottom: "4px" }}>
+            <label style={{ fontSize: "12px", fontWeight: "600", color: "#475569" }}>內建字幕翻譯服務</label>
+            <select
+              value={builtInTranslator}
+              onChange={(e) => handleTranslatorChange(e.target.value as "google" | "microsoft")}
+              style={{
+                backgroundColor: "#ffffff",
+                border: "1px solid #cbd5e1",
+                borderRadius: "6px",
+                padding: "6px 10px",
+                color: "#0f172a",
+                fontSize: "12.5px",
+                outline: "none",
+                width: "100%",
+                boxSizing: "border-box",
+                cursor: "pointer",
+              }}
+            >
+              <option value="google">Google 翻譯 (免費版)</option>
+              <option value="microsoft">微軟翻譯 (免費版)</option>
+            </select>
+          </div>
 
           <button
             onClick={handleToggle}

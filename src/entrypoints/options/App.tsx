@@ -44,6 +44,7 @@ const App: React.FC = () => {
   const [sourceLang, setSourceLang] = useState<string>("auto");
   const [targetLang, setTargetLang] = useState<string>("zh-Hant");
   const [hotSwap, setHotSwap] = useState<number>(90);
+  const [builtInTranslator, setBuiltInTranslator] = useState<"google" | "microsoft">("google");
 
   useEffect(() => {
     getLiveTranslateConfig().then((config) => {
@@ -51,6 +52,7 @@ const App: React.FC = () => {
       setModelName(config.modelName || "gemini-3.5-live-translate-preview");
       setTargetLang(config.targetLang);
       setHotSwap(config.hotSwap);
+      setBuiltInTranslator(config.builtInTranslator || "google");
       // 擴充套件可能沒有存 sourceLang，如果有的話讀取
       const anyConfig = config as any;
       if (anyConfig.sourceLang) {
@@ -82,6 +84,11 @@ const App: React.FC = () => {
   const handleHotSwapChange = (val: number) => {
     setHotSwap(val);
     saveLiveTranslateConfig({ hotSwap: val });
+  };
+
+  const handleBuiltInTranslatorChange = (val: "google" | "microsoft") => {
+    setBuiltInTranslator(val);
+    saveLiveTranslateConfig({ builtInTranslator: val });
   };
 
   return (
@@ -213,6 +220,19 @@ const App: React.FC = () => {
                     ))}
                   </select>
                   <span style={tipStyle}>* 即時翻譯產出的字幕目標語系，預設為繁體中文。</span>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  <label style={labelStyle}>內建字幕翻譯來源 (Built-in Subtitle Translator)</label>
+                  <select
+                    value={builtInTranslator}
+                    onChange={(e) => handleBuiltInTranslatorChange(e.target.value as "google" | "microsoft")}
+                    style={selectStyle}
+                  >
+                    <option value="google">Google 翻譯 (免費版)</option>
+                    <option value="microsoft">微軟翻譯 (免費版)</option>
+                  </select>
+                  <span style={tipStyle}>* 當使用內建字幕時，所採用的免費翻譯引擎來源。</span>
                 </div>
 
                 <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
