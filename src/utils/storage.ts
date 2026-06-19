@@ -8,6 +8,7 @@ export interface SubtitleTextStyle {
 export interface SubtitleStyle {
   textAlign: "center" | "left";
   maxLines: number;
+  builtInMaxLines: number;
   backgroundOpacity: number; // 0 到 100
   displayMode: "both" | "original" | "translation";
   translationPosition: "up" | "down";
@@ -27,7 +28,8 @@ export interface AppConfig {
 
 const DEFAULT_STYLE: SubtitleStyle = {
   textAlign: "center",
-  maxLines: 3,
+  maxLines: 2,
+  builtInMaxLines: 1,
   backgroundOpacity: 75,
   displayMode: "both",
   translationPosition: "down",

@@ -6,7 +6,7 @@ export default defineConfig({
   modules: ["@wxt-dev/module-react"],
   manifest: {
     name: "蜂鳥影片即時翻譯",
-    version: "1.1.1",
+    version: "1.1.3",
     description: "擷取影片音訊，透過 Gemini 3.5 Live API 即時生成並渲染雙語字幕",
     icons: {
       "16": "icons/icon-16.png",

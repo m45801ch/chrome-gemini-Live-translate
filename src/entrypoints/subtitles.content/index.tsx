@@ -202,6 +202,8 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
   const [active, setActive] = useState(false);
   const [verticalPercent, setVerticalPercent] = useState(10);
   const [isDragging, setIsDragging] = useState(false);
+  const [isHovered, setIsHovered] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(false);
   const [status, setStatus] = useState("disconnected");
   const dragStartRef = useRef<{ startY: number; startPercent: number } | null>(null);
 
@@ -253,6 +255,27 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
       }
     });
   }, []);
+
+  // 監聽播放器控制列（進度條）顯示/隱藏狀態
+  useEffect(() => {
+    const isYouTube = window.location.hostname.includes("youtube.com");
+    if (!isYouTube) return;
+
+    const updateVisibility = () => {
+      const hasAutohide = playerContainer.classList.contains("ytp-autohide");
+      setControlsVisible(!hasAutohide);
+    };
+
+    updateVisibility();
+
+    const observer = new MutationObserver(updateVisibility);
+    observer.observe(playerContainer, {
+      attributes: true,
+      attributeFilter: ["class"]
+    });
+
+    return () => observer.disconnect();
+  }, [playerContainer]);
 
   // 監聽內建字幕的變更與翻譯（下載完整字幕軌 + 時間排程器 + 預翻譯）
   useEffect(() => {
@@ -366,7 +389,7 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
         return;
       }
 
-      const maxLines = configRef.current?.subtitleStyle.maxLines ?? 3;
+      const maxLines = configRef.current?.subtitleStyle.builtInMaxLines ?? 1;
       const startIndex = Math.max(0, currentIndex - maxLines + 1);
       const activeLines = subtitleEvents.slice(startIndex, currentIndex + 1);
 
@@ -530,7 +553,7 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
       // 往上拖曳（deltaY < 0）時，高度百分比應增加
       const deltaPercent = -(deltaY / rect.height) * 100;
       const nextPercent = dragStartRef.current.startPercent + deltaPercent;
-      const percent = Math.max(5, Math.min(85, nextPercent));
+      const percent = Math.max(0, Math.min(95, nextPercent));
       setVerticalPercent(percent);
     };
     const onUp = () => setIsDragging(false);
@@ -560,12 +583,17 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
   const mainFontSize = (subtitleStyle.main.fontScale / 100) * 22;
   const transFontSize = (subtitleStyle.translation.fontScale / 100) * 22;
 
+  const playerRect = playerContainer.getBoundingClientRect();
+  const controlsHeight = playerContainer.querySelector(".ytp-chrome-bottom")?.getBoundingClientRect().height || 48;
+  const baseBottomPx = playerRect.height > 0 ? (verticalPercent / 100) * playerRect.height : 0;
+  const finalBottomPx = controlsVisible ? Math.max(baseBottomPx, controlsHeight) : baseBottomPx;
+
   const containerStyle: React.CSSProperties = {
     position: "absolute",
     left: "0",
     right: "0",
     margin: "0 auto",
-    bottom: `${verticalPercent}%`,
+    bottom: `${finalBottomPx}px`,
     width: "fit-content",
     maxWidth: "80%",
     backgroundColor: `rgba(0, 0, 0, ${subtitleStyle.backgroundOpacity / 100})`,
@@ -578,14 +606,18 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
     gap: "6px",
     border: subtitleStyle.backgroundOpacity > 0 ? "1px solid rgba(255, 255, 255, 0.08)" : "none",
     boxShadow: subtitleStyle.backgroundOpacity > 0 ? "0 10px 15px -3px rgba(0,0,0,0.4)" : "none",
-    cursor: isDragging ? "grabbing" : "grab",
+    cursor: "default",
     transition: isDragging ? "none" : "bottom 0.1s ease-out",
     alignItems: isLeftAlign ? "flex-start" : "center",
     textAlign: isLeftAlign ? "left" : "center",
   };
 
+  const currentMaxLines = config.useBuiltInSubtitles 
+    ? (config.subtitleStyle.builtInMaxLines ?? 1)
+    : config.subtitleStyle.maxLines;
+
   const mainBlockStyle: React.CSSProperties = {
-    maxHeight: `${subtitleStyle.maxLines * 1.4 * mainFontSize}px`,
+    maxHeight: `${currentMaxLines * 1.4 * mainFontSize}px`,
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
@@ -595,7 +627,7 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
   };
 
   const transBlockStyle: React.CSSProperties = {
-    maxHeight: `${subtitleStyle.maxLines * 1.4 * transFontSize}px`,
+    maxHeight: `${currentMaxLines * 1.4 * transFontSize}px`,
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
@@ -631,7 +663,7 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
   const rawEntries = displaySubtitle.entries || [
     { original: displaySubtitle.original, translation: displaySubtitle.translation },
   ];
-  const entries = rawEntries.slice(-subtitleStyle.maxLines);
+  const entries = rawEntries.slice(-currentMaxLines);
 
   return (
     <>
@@ -652,7 +684,42 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
           }}
         />
       )}
-      <div style={containerStyle} onMouseDown={handleMouseDown} title="拖曳可調整字幕高度">
+      <div
+        style={containerStyle}
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
+      >
+        {(isHovered || isDragging) && (
+          <div
+            onMouseDown={handleMouseDown}
+            style={{
+              position: "absolute",
+              top: "-26px",
+              left: "50%",
+              transform: "translateX(-50%)",
+              width: "48px",
+              height: "28px",
+              backgroundColor: "rgba(15, 23, 42, 0.95)",
+              border: "1px solid rgba(255, 255, 255, 0.2)",
+              borderRadius: "6px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: isDragging ? "grabbing" : "grab",
+              pointerEvents: "auto",
+              boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.25), 0 2px 4px -1px rgba(0, 0, 0, 0.15)",
+              transition: "background-color 0.15s",
+              zIndex: 10,
+            }}
+            title="拖曳以調整字幕高度"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#e2e8f0" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 3v18" />
+              <path d="M8 7l4-4 4 4" />
+              <path d="M8 17l4 4 4-4" />
+            </svg>
+          </div>
+        )}
         {config.subtitleStyle.translationPosition === "up" ? (
           <>
             {config.subtitleStyle.displayMode !== "original" && displaySubtitle.translation && (
@@ -760,6 +827,20 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [downloadingType, setDownloadingType] = useState<"original" | "translation" | "both" | null>(null);
   const [downloadProgress, setDownloadProgress] = useState(0);
+
+  useEffect(() => {
+    const parentButton = btnRef.current?.closest("#live-translate-yt-btn");
+    if (parentButton) {
+      if (showMenu) {
+        parentButton.style.backgroundColor = "#ffffff";
+        parentButton.style.borderRadius = "8px";
+        parentButton.style.transition = "background-color 0.15s ease, border-radius 0.15s ease";
+      } else {
+        parentButton.style.backgroundColor = "transparent";
+        parentButton.style.borderRadius = "0";
+      }
+    }
+  }, [showMenu]);
 
   useEffect(() => {
     chrome.runtime.sendMessage({ type: "getLiveTranslateState" }, (res) => {
@@ -1067,19 +1148,69 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
                   <IconSubtitles size={16} stroke={1.5} color="#475569" />
                   <span style={{ fontWeight: "500" }}>使用影片內建字幕</span>
                 </div>
-                <input
-                  type="checkbox"
-                  checked={config?.useBuiltInSubtitles === true}
-                  onChange={handleUseBuiltInChange}
+                <button
+                  onClick={async () => {
+                    const nextVal = !(config?.useBuiltInSubtitles === true);
+                    await handleUseBuiltInChange({ target: { checked: nextVal } } as any);
+                  }}
                   style={{
                     cursor: "pointer",
-                    width: "16px",
-                    height: "16px",
-                    accentColor: "#0284c7",
-                    margin: 0,
+                    border: "none",
+                    borderRadius: "14px",
+                    width: "50px",
+                    height: "24px",
+                    backgroundColor: config?.useBuiltInSubtitles === true ? "#10b981" : "#94a3b8",
+                    display: "flex",
+                    alignItems: "center",
+                    padding: "2px 4px",
+                    position: "relative",
+                    transition: "background-color 0.2s ease, justify-content 0.2s ease",
+                    justifyContent: config?.useBuiltInSubtitles === true ? "flex-end" : "flex-start",
+                    boxSizing: "border-box",
                   }}
-                />
+                >
+                  <span style={{
+                    fontSize: "9px",
+                    fontWeight: "600",
+                    color: "#ffffff",
+                    position: "absolute",
+                    left: config?.useBuiltInSubtitles === true ? "6px" : "auto",
+                    right: config?.useBuiltInSubtitles === true ? "auto" : "6px",
+                    userSelect: "none",
+                  }}>
+                    {config?.useBuiltInSubtitles === true ? "on" : "off"}
+                  </span>
+                  <div style={{
+                    width: "18px",
+                    height: "18px",
+                    borderRadius: "50%",
+                    backgroundColor: "#ffffff",
+                    boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+                    zIndex: 1,
+                  }} />
+                </button>
               </div>
+
+              {/* 字幕下載入口 */}
+              <button
+                onClick={() => setView("download")}
+                style={{
+                  width: "100%", border: "1px solid #e2e8f0", borderRadius: "10px",
+                  padding: "10px 12px", backgroundColor: "#f8fafc",
+                  color: "#475569", fontSize: "12px", cursor: "pointer",
+                  display: "flex", alignItems: "center",
+                  justifyContent: "space-between",
+                  transition: "background-color 0.15s",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#f1f5f9")}
+                onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "#f8fafc")}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <IconDownload size={16} stroke={1.5} color="#475569" />
+                  <span>字幕下載</span>
+                </div>
+                <span style={{ color: "#94a3b8" }}>›</span>
+              </button>
 
               {/* 字幕樣式入口 */}
               <button
@@ -1097,26 +1228,6 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
                 <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                   <IconPalette size={16} stroke={1.5} color="#475569" />
                   <span>字幕樣式</span>
-                </div>
-                <span style={{ color: "#94a3b8" }}>›</span>
-              </button>
-
-              {/* 字幕下載入口 */}
-              <button
-                onClick={() => setView("download")}
-                style={{
-                  width: "100%", border: "1px solid #e2e8f0", borderRadius: "10px",
-                  padding: "10px 12px", backgroundColor: "#f8fafc",
-                  color: "#475569", fontSize: "12px", cursor: "pointer",
-                  display: "flex", alignItems: "center", justifyContent: "space-between",
-                  transition: "background-color 0.15s",
-                }}
-                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#f1f5f9")}
-                onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "#f8fafc")}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                  <IconDownload size={16} stroke={1.5} color="#475569" />
-                  <span>字幕下載</span>
                 </div>
                 <span style={{ color: "#94a3b8" }}>›</span>
               </button>

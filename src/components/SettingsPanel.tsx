@@ -241,11 +241,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onConfigChange }) 
         <Field label="最大行數">
           <div style={{ display: "flex", gap: "4px" }}>
             {([1, 2, 3] as const).map((lines) => {
-              const isActive = s.maxLines === lines;
+              const isBuiltIn = config.useBuiltInSubtitles;
+              const currentVal = isBuiltIn ? (s.builtInMaxLines ?? 1) : s.maxLines;
+              const isActive = currentVal === lines;
               return (
                 <button
                   key={lines}
-                  onClick={() => updateGlobal("maxLines", lines)}
+                  onClick={() => updateGlobal(isBuiltIn ? "builtInMaxLines" : "maxLines", lines)}
                   style={getBtnStyle(isActive)}
                 >
                   {lines} 行

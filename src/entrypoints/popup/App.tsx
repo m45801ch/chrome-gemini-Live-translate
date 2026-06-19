@@ -232,6 +232,7 @@ const App: React.FC = () => {
         // 開始即時翻譯
         setErrorMsg("");
         setStatus("connecting");
+        saveLiveTranslateConfig({ useBuiltInSubtitles: false });
         chrome.runtime.sendMessage({ type: "startVideoLiveTranslate", data: { tabId: activeTabId } }, (res) => {
           if (res && !res.ok) {
             setIsActive(false);
@@ -326,7 +327,8 @@ const App: React.FC = () => {
 
       {/* Footer */}
       <div style={footerStyle}>
-        <span>Gemini Live Translate</span>
+        <span>使用 Gemini Live Translate 驅動</span>
+        <span>V{chrome.runtime.getManifest().version}</span>
       </div>
     </div>
   );
@@ -421,7 +423,9 @@ const actionBtnStyle: React.CSSProperties = {
 };
 
 const footerStyle: React.CSSProperties = {
-  textAlign: "center",
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
   fontSize: "11px",
   color: "#64748b",
   borderTop: "1px solid #e2e8f0",
