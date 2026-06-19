@@ -6,6 +6,8 @@ import { getLiveTranslateConfig, saveLiveTranslateConfig, AppConfig } from "@/ut
 import { LiveSubtitleManager } from "@/utils/live-subtitle-manager"
 import { SettingsPanel } from "@/components/SettingsPanel"
 import { googleTranslate, microsoftTranslate } from "@/utils/free-translator"
+import { optimizeSubtitles } from "@/utils/subtitles/processor/optimizer"
+import { IconSubtitles, IconPalette, IconDownload, IconFileText, IconLanguage } from "@tabler/icons-react"
 
 declare global {
   interface Window {
@@ -71,7 +73,7 @@ function initLiveTranslateForVideo(video: HTMLVideoElement, playerContainer: HTM
   subtitleHost.id = "live-translate-subtitles-host";
   subtitleHost.style.cssText = `
     position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-    pointer-events: none; z-index: 2147483647; overflow: visible;
+    pointer-events: none; z-index: 29; overflow: visible;
   `;
   const shadowRoot = subtitleHost.attachShadow({ mode: "open" });
   playerContainer.appendChild(subtitleHost);
@@ -93,7 +95,7 @@ function initLiveTranslateForVideo(video: HTMLVideoElement, playerContainer: HTM
 // ─── 蜂鳥圖示 ──────────────────────────────────────────────────────────────────
 const HummingbirdIcon: React.FC<{ active: boolean; size?: number }> = ({ active, size = 22 }) => (
   <img
-    src={chrome.runtime.getURL("icons/icon-48.png")}
+    src={chrome.runtime.getURL(active ? "icons/hummingbird-on.png" : "icons/hummingbird-off.png")}
     alt="Hummingbird Icon"
     style={{
       width: `${size}px`,
@@ -103,14 +105,58 @@ const HummingbirdIcon: React.FC<{ active: boolean; size?: number }> = ({ active,
       objectFit: "contain",
       flexShrink: 0,
       display: "block",
-      // ON → 原色加輕微綠暈；OFF → 紅色
-      filter: active
-        ? "drop-shadow(0 0 3px #4ade80)"          // 原圖 + 綠色外光
-        : "drop-shadow(0 0 2px #ef4444) sepia(1) saturate(5) hue-rotate(340deg) brightness(0.9)", // 轉成紅色
-      transition: "filter 0.25s",
     }}
   />
 );
+
+const StatusIcon: React.FC<{ active: boolean; useBuiltIn: boolean; size?: number }> = ({ active, useBuiltIn, size = 22 }) => {
+  if (useBuiltIn) {
+    return (
+      <img
+        src={chrome.runtime.getURL("icons/hummingbird-cc.png")}
+        alt="CC Icon"
+        style={{
+          width: `${size}px`,
+          height: `${size}px`,
+          minWidth: `${size}px`,
+          minHeight: `${size}px`,
+          objectFit: "contain",
+          flexShrink: 0,
+          display: "block",
+        }}
+      />
+    );
+  }
+  return <HummingbirdIcon active={active} size={size} />;
+};
+
+function formatTimeSRT(ms: number): string {
+  const hours = Math.floor(ms / 3600000);
+  const minutes = Math.floor((ms % 3600000) / 60000);
+  const seconds = Math.floor((ms % 60000) / 1000);
+  const milliseconds = Math.floor(ms % 1000);
+
+  const pad = (n: number, width: number = 2) => String(n).padStart(width, "0");
+
+  return `${pad(hours)}:${pad(minutes)}:${pad(seconds)},${pad(milliseconds, 3)}`;
+}
+
+function exportToSRT(events: any[], type: "original" | "translation" | "both"): string {
+  return events
+    .map((ev, index) => {
+      const timeStr = `${formatTimeSRT(ev.start)} --> ${formatTimeSRT(ev.end)}`;
+      let content = "";
+      if (type === "original") {
+        content = ev.text;
+      } else if (type === "translation") {
+        content = ev.translation || "";
+      } else {
+        content = `${ev.text}\n${ev.translation || ""}`;
+      }
+      return `${index + 1}\n${timeStr}\n${content}\n`;
+    })
+    .join("\n");
+}
 
 // ─── Font map ────────────────────────────────────────────────────────────────
 const FONT_FAMILIES: Record<string, string> = {
@@ -118,6 +164,24 @@ const FONT_FAMILIES: Record<string, string> = {
   "roboto": "Roboto, sans-serif",
   "noto-sans": "'Noto Sans', 'Noto Sans SC', 'Noto Sans JP', sans-serif",
   "noto-serif": "'Noto Serif', 'Noto Serif SC', 'Noto Serif JP', serif",
+};
+
+import { YoutubeSubtitlesFetcher } from "@/utils/subtitles/fetchers/youtube";
+
+interface YouTubeSubtitleEvent {
+  start: number;
+  end: number;
+  text: string;
+  translation: string;
+}
+
+const getYoutubeVideoId = (): string => {
+  try {
+    const url = new URL(window.location.href);
+    return url.searchParams.get("v") || "";
+  } catch (e) {
+    return "";
+  }
 };
 
 // ─── SubtitleRenderer ────────────────────────────────────────────────────────
@@ -190,106 +254,156 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
     });
   }, []);
 
-  // 監聽內建字幕的變更與翻譯
+  // 監聽內建字幕的變更與翻譯（下載完整字幕軌 + 時間排程器 + 預翻譯）
   useEffect(() => {
     if (!config?.useBuiltInSubtitles) {
       setBuiltInSubtitle(null);
       return;
     }
 
-    let observer: MutationObserver | null = null;
-    let debounceTimer: NodeJS.Timeout | null = null;
-    let lastText = "";
+    let active = true;
+    let subtitleEvents: YouTubeSubtitleEvent[] = [];
+    const video = playerContainer.querySelector("video");
+    const translateQueue = new Set<string>();
+    const fetcher = new YoutubeSubtitlesFetcher();
 
-    const startObserving = () => {
-      const targetContainer = playerContainer.querySelector(".ytp-caption-window-container");
-      if (!targetContainer) return false;
+    const loadSubtitles = async () => {
+      const videoId = getYoutubeVideoId();
+      if (!videoId) return;
 
-      observer = new MutationObserver(() => {
-        const segments = playerContainer.querySelectorAll(".ytp-caption-segment");
-        const currentText = Array.from(segments)
-          .map(s => s.textContent || "")
-          .join(" ")
-          .trim();
-
-        if (!currentText) {
-          if (debounceTimer) clearTimeout(debounceTimer);
-          debounceTimer = setTimeout(() => {
-            lastText = "";
-            setBuiltInSubtitle(null);
-          }, 800);
-          return;
-        }
-
-        if (currentText !== lastText) {
-          if (debounceTimer) clearTimeout(debounceTimer);
-          debounceTimer = setTimeout(async () => {
-            lastText = currentText;
-
-            if (config.subtitleStyle.displayMode === "original") {
-              setBuiltInSubtitle({
-                original: currentText,
-                translation: "",
-                entries: [{ original: currentText, translation: "" }]
-              });
-              return;
-            }
-
-            try {
-              let translated = "";
-              const provider = config.builtInTranslator || "google";
-              const target = config.targetLang || "zh-Hant";
-
-              if (provider === "microsoft") {
-                translated = await microsoftTranslate(currentText, "auto", target);
-              } else {
-                translated = await googleTranslate(currentText, "auto", target);
-              }
-
-              setBuiltInSubtitle({
-                original: currentText,
-                translation: translated,
-                entries: [{ original: currentText, translation: translated }]
-              });
-            } catch (err) {
-              console.error("[VLT] Built-in subtitle translation failed:", err);
-              setBuiltInSubtitle({
-                original: currentText,
-                translation: "[翻譯失敗]",
-                entries: [{ original: currentText, translation: "[翻譯失敗]" }]
-              });
-            }
-          }, 400);
-        }
+      setBuiltInSubtitle({
+        original: "正在載入字幕軌...",
+        translation: "正在載入字幕軌...",
+        entries: [{ original: "正在載入字幕軌...", translation: "正在載入字幕軌..." }]
       });
 
-      observer.observe(targetContainer, {
-        childList: true,
-        subtree: true,
-        characterData: true
-      });
+      try {
+        const fragments = await fetcher.fetch();
+        if (!active) return;
 
-      return true;
+        const sourceLanguage = fetcher.getSourceLanguage();
+        const optimized = optimizeSubtitles(fragments, sourceLanguage);
+
+        subtitleEvents = optimized.map(f => ({
+          start: f.start,
+          end: f.end,
+          text: f.text,
+          translation: f.translation || "",
+        }));
+        (window as any).__YOUTUBE_SUBTITLE_EVENTS__ = subtitleEvents;
+
+        if (subtitleEvents.length === 0) {
+          setBuiltInSubtitle(null);
+        } else {
+          // Trigger initial check
+          handleTimeUpdate();
+        }
+      } catch (err) {
+        console.error("[VLT] Failed to fetch subtitles via YoutubeSubtitlesFetcher:", err);
+        setBuiltInSubtitle({
+          original: "此影片無內建字幕",
+          translation: "請使用即時翻譯功能",
+          entries: [{ original: "此影片無內建字幕", translation: "請使用即時翻譯功能" }]
+        });
+      }
     };
 
-    if (!startObserving()) {
-      const interval = setInterval(() => {
-        if (startObserving()) {
-          clearInterval(interval);
+    loadSubtitles();
+
+    const handleTimeUpdate = async () => {
+      if (!video || subtitleEvents.length === 0) return;
+      const timeMs = video.currentTime * 1000;
+
+      // 找出當前播放時間對應的字幕行 (支援多行重疊)
+      const activeLines = subtitleEvents.filter(ev => ev.start <= timeMs && ev.end > timeMs);
+
+      // 預尋找與翻譯未來 4 句
+      const currentIndex = subtitleEvents.findIndex(ev => ev.start <= timeMs && ev.end > timeMs);
+      if (currentIndex !== -1) {
+        const provider = configRef.current?.builtInTranslator || "google";
+        const target = configRef.current?.targetLang || "zh-Hant";
+
+        for (let i = 0; i < 4; i++) {
+          const index = currentIndex + i;
+          if (index >= subtitleEvents.length) break;
+          const ev = subtitleEvents[index];
+
+          if (!ev.translation && !translateQueue.has(ev.text)) {
+            translateQueue.add(ev.text);
+            (async () => {
+              try {
+                let translated = "";
+                if (provider === "microsoft") {
+                  translated = await microsoftTranslate(ev.text, "auto", target);
+                } else {
+                  translated = await googleTranslate(ev.text, "auto", target);
+                }
+                ev.translation = translated;
+              } catch (err) {
+                console.error("[VLT] Pre-translation failed for:", ev.text, err);
+              } finally {
+                translateQueue.delete(ev.text);
+                // 如果目前剛好播到這句，立刻更新 UI
+                if (active && video.currentTime * 1000 >= ev.start && video.currentTime * 1000 < ev.end) {
+                  updateUI();
+                }
+              }
+            })();
+          }
         }
-      }, 1000);
-      return () => {
-        clearInterval(interval);
-        if (observer) observer.disconnect();
-        if (debounceTimer) clearTimeout(debounceTimer);
-      };
+      }
+
+      updateUI();
+    };
+
+    const updateUI = () => {
+      if (!video || !active) return;
+      const timeMs = video.currentTime * 1000;
+      
+      const currentIndex = subtitleEvents.findIndex(ev => ev.start <= timeMs && ev.end > timeMs);
+      if (currentIndex === -1) {
+        setBuiltInSubtitle(null);
+        return;
+      }
+
+      const maxLines = configRef.current?.subtitleStyle.maxLines ?? 3;
+      const startIndex = Math.max(0, currentIndex - maxLines + 1);
+      const activeLines = subtitleEvents.slice(startIndex, currentIndex + 1);
+
+      setBuiltInSubtitle({
+        original: activeLines.map(e => e.text).join("\n"),
+        translation: activeLines.map(e => e.translation || "[翻譯中...]").join("\n"),
+        entries: activeLines.map(e => ({
+          original: e.text,
+          translation: e.translation || "[翻譯中...]"
+        }))
+      });
+    };
+
+    if (video) {
+      video.addEventListener("timeupdate", handleTimeUpdate);
+      video.addEventListener("seeking", handleTimeUpdate);
     }
 
-    return () => {
-      if (observer) observer.disconnect();
-      if (debounceTimer) clearTimeout(debounceTimer);
+    const handleYtNavigate = () => {
+      fetcher.cleanup();
+      subtitleEvents = [];
+      (window as any).__YOUTUBE_SUBTITLE_EVENTS__ = null;
+      loadSubtitles();
     };
-  }, [config?.useBuiltInSubtitles, config?.builtInTranslator, config?.targetLang, config?.subtitleStyle.displayMode, playerContainer]);
+    window.addEventListener("yt-navigate-finish", handleYtNavigate);
+
+    return () => {
+      active = false;
+      fetcher.cleanup();
+      (window as any).__YOUTUBE_SUBTITLE_EVENTS__ = null;
+      if (video) {
+        video.removeEventListener("timeupdate", handleTimeUpdate);
+        video.removeEventListener("seeking", handleTimeUpdate);
+      }
+      window.removeEventListener("yt-navigate-finish", handleYtNavigate);
+    };
+  }, [config?.useBuiltInSubtitles, config?.builtInTranslator, config?.targetLang, playerContainer]);
 
   // 動態顯示與隱藏原生 YouTube 字幕
   useEffect(() => {
@@ -454,7 +568,7 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
     bottom: `${verticalPercent}%`,
     width: "fit-content",
     maxWidth: "80%",
-    backgroundColor: `rgba(15, 23, 42, ${subtitleStyle.backgroundOpacity / 100})`,
+    backgroundColor: `rgba(0, 0, 0, ${subtitleStyle.backgroundOpacity / 100})`,
     borderRadius: "10px",
     padding: "10px 18px",
     pointerEvents: "auto",
@@ -462,8 +576,8 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
     display: "flex",
     flexDirection: "column",
     gap: "6px",
-    border: "1px solid rgba(255, 255, 255, 0.08)",
-    boxShadow: "0 10px 15px -3px rgba(0,0,0,0.4)",
+    border: subtitleStyle.backgroundOpacity > 0 ? "1px solid rgba(255, 255, 255, 0.08)" : "none",
+    boxShadow: subtitleStyle.backgroundOpacity > 0 ? "0 10px 15px -3px rgba(0,0,0,0.4)" : "none",
     cursor: isDragging ? "grabbing" : "grab",
     transition: isDragging ? "none" : "bottom 0.1s ease-out",
     alignItems: isLeftAlign ? "flex-start" : "center",
@@ -514,9 +628,10 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
     flexShrink: 0,
   };
 
-  const entries = displaySubtitle.entries || [
+  const rawEntries = displaySubtitle.entries || [
     { original: displaySubtitle.original, translation: displaySubtitle.translation },
   ];
+  const entries = rawEntries.slice(-subtitleStyle.maxLines);
 
   return (
     <>
@@ -538,19 +653,68 @@ const SubtitleRenderer: React.FC<{ playerContainer: HTMLElement }> = ({ playerCo
         />
       )}
       <div style={containerStyle} onMouseDown={handleMouseDown} title="拖曳可調整字幕高度">
-        {config.subtitleStyle.displayMode !== "translation" && displaySubtitle.original && (
-          <div style={mainBlockStyle}>
-            {entries.map((entry, idx) => entry.original && (
-              <div key={idx} style={mainStyle}>{entry.original}</div>
-            ))}
-          </div>
-        )}
-        {config.subtitleStyle.displayMode !== "original" && displaySubtitle.translation && (
-          <div style={transBlockStyle}>
-            {entries.map((entry, idx) => entry.translation && (
-              <div key={idx} style={transStyle}>{entry.translation}</div>
-            ))}
-          </div>
+        {config.subtitleStyle.translationPosition === "up" ? (
+          <>
+            {config.subtitleStyle.displayMode !== "original" && displaySubtitle.translation && (
+              <div style={transBlockStyle}>
+                {entries.map((entry, idx) => entry.translation && (
+                  <div key={idx} style={{
+                    ...transStyle,
+                    color: idx < entries.length - 1 ? "#94a3b8" : subtitleStyle.translation.color,
+                    fontSize: idx < entries.length - 1 ? `${transFontSize * 0.9}px` : `${transFontSize}px`,
+                    fontWeight: idx < entries.length - 1 ? Math.max(300, (subtitleStyle.translation.fontWeight || 400) - 100) : subtitleStyle.translation.fontWeight
+                  }}>
+                    {entry.translation}
+                  </div>
+                ))}
+              </div>
+            )}
+            {config.subtitleStyle.displayMode !== "translation" && displaySubtitle.original && (
+              <div style={mainBlockStyle}>
+                {entries.map((entry, idx) => entry.original && (
+                  <div key={idx} style={{
+                    ...mainStyle,
+                    color: idx < entries.length - 1 ? "#cbd5e1" : subtitleStyle.main.color,
+                    fontSize: idx < entries.length - 1 ? `${mainFontSize * 0.9}px` : `${mainFontSize}px`,
+                    fontWeight: idx < entries.length - 1 ? Math.max(300, (subtitleStyle.main.fontWeight || 400) - 100) : subtitleStyle.main.fontWeight
+                  }}>
+                    {entry.original}
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            {config.subtitleStyle.displayMode !== "translation" && displaySubtitle.original && (
+              <div style={mainBlockStyle}>
+                {entries.map((entry, idx) => entry.original && (
+                  <div key={idx} style={{
+                    ...mainStyle,
+                    color: idx < entries.length - 1 ? "#cbd5e1" : subtitleStyle.main.color,
+                    fontSize: idx < entries.length - 1 ? `${mainFontSize * 0.9}px` : `${mainFontSize}px`,
+                    fontWeight: idx < entries.length - 1 ? Math.max(300, (subtitleStyle.main.fontWeight || 400) - 100) : subtitleStyle.main.fontWeight
+                  }}>
+                    {entry.original}
+                  </div>
+                ))}
+              </div>
+            )}
+            {config.subtitleStyle.displayMode !== "original" && displaySubtitle.translation && (
+              <div style={transBlockStyle}>
+                {entries.map((entry, idx) => entry.translation && (
+                  <div key={idx} style={{
+                    ...transStyle,
+                    color: idx < entries.length - 1 ? "#94a3b8" : subtitleStyle.translation.color,
+                    fontSize: idx < entries.length - 1 ? `${transFontSize * 0.9}px` : `${transFontSize}px`,
+                    fontWeight: idx < entries.length - 1 ? Math.max(300, (subtitleStyle.translation.fontWeight || 400) - 100) : subtitleStyle.translation.fontWeight
+                  }}>
+                    {entry.translation}
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
     </>
@@ -590,10 +754,12 @@ function injectYouTubeControls(playerContainer: HTMLElement) {
 // ─── PlayerControlButton ──────────────────────────────────────────────────────
 const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playerContainer }) => {
   const [showMenu, setShowMenu] = useState(false);
-  const [view, setView] = useState<"main" | "style">("main");
+  const [view, setView] = useState<"main" | "style" | "download">("main");
   const [active, setActive] = useState(false);
   const [status, setStatus] = useState("disconnected");
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [downloadingType, setDownloadingType] = useState<"original" | "translation" | "both" | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState(0);
 
   useEffect(() => {
     chrome.runtime.sendMessage({ type: "getLiveTranslateState" }, (res) => {
@@ -700,6 +866,83 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
     }
   };
 
+  const hasSubtitles = typeof window !== "undefined" && !!(window as any).__YOUTUBE_SUBTITLE_EVENTS__;
+
+  const handleDownload = async (type: "original" | "translation" | "both") => {
+    const events = (window as any).__YOUTUBE_SUBTITLE_EVENTS__;
+    if (!events || events.length === 0) {
+      alert("目前沒有載入的字幕軌可供下載。");
+      return;
+    }
+
+    if (downloadingType) return;
+    setDownloadingType(type);
+    setDownloadProgress(0);
+
+    try {
+      if (type === "translation" || type === "both") {
+        const untranslatedLines = events.filter((ev: any) => !ev.translation);
+        if (untranslatedLines.length > 0) {
+          const provider = config?.builtInTranslator || "google";
+          const target = config?.targetLang || "zh-Hant";
+          const batchSize = 10;
+          let completed = 0;
+
+          for (let i = 0; i < untranslatedLines.length; i += batchSize) {
+            const batch = untranslatedLines.slice(i, i + batchSize);
+            await Promise.all(
+              batch.map(async (ev: any) => {
+                try {
+                  let translated = "";
+                  if (provider === "microsoft") {
+                    translated = await microsoftTranslate(ev.text, "auto", target);
+                  } else {
+                    translated = await googleTranslate(ev.text, "auto", target);
+                  }
+                  ev.translation = translated;
+                } catch (err) {
+                  console.error("[VLT] Batch translation failed for:", ev.text, err);
+                  ev.translation = "[翻譯失敗]";
+                }
+              })
+            );
+            completed += batch.length;
+            setDownloadProgress(Math.round((completed / untranslatedLines.length) * 100));
+          }
+        }
+      }
+
+      const srtContent = exportToSRT(events, type);
+      const blob = new Blob([srtContent], { type: "text/srt;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      
+      let title = "youtube_subtitle";
+      const titleEl = document.querySelector("h1.ytd-watch-metadata, #container h1.title");
+      if (titleEl && titleEl.textContent) {
+        title = titleEl.textContent.trim().replace(/[\\/:*?"<>|]/g, "_");
+      }
+
+      let suffix = "";
+      if (type === "original") suffix = "原文";
+      else if (type === "translation") suffix = "譯文";
+      else suffix = "雙語";
+
+      link.setAttribute("download", `${title}_${suffix}.srt`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("[VLT] Download error:", err);
+      alert("下載過程中發生錯誤。");
+    } finally {
+      setDownloadingType(null);
+      setDownloadProgress(0);
+    }
+  };
+
   const openMenu = () => { setShowMenu(true); setView("main"); };
   const closeMenu = () => { setShowMenu(false); setView("main"); };
 
@@ -710,8 +953,8 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
     backgroundColor: "#ffffff",
     border: "1px solid #e2e8f0",
     borderRadius: "14px",
-    width: view === "style" ? "340px" : "260px",
-    maxHeight: view === "style" ? "500px" : "auto",
+    width: view === "style" ? "290px" : view === "download" ? "270px" : "260px",
+    maxHeight: (view === "style" || view === "download") ? "500px" : "auto",
     overflowY: "auto",
     padding: "14px",
     color: "#1e293b",
@@ -743,7 +986,7 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
         overflow: "visible",
       }}
     >
-      <HummingbirdIcon active={active} size={28} />
+      <StatusIcon active={active} useBuiltIn={!!config?.useBuiltInSubtitles} size={28} />
       <span
         style={{
           position: "absolute",
@@ -752,8 +995,8 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
           fontSize: "8px",
           fontWeight: "bold",
           lineHeight: "1.2",
-          color: active ? "#ffffff" : "#ef4444",
-          backgroundColor: active ? "#10b981" : "#ffffff",
+          color: (active || config?.useBuiltInSubtitles) ? "#ffffff" : "#ef4444",
+          backgroundColor: (active || config?.useBuiltInSubtitles) ? "#10b981" : "#ffffff",
           padding: "1.5px 5px",
           borderRadius: "8px",
           boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
@@ -763,7 +1006,7 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
           textAlign: "center",
         }}
       >
-        {active ? "ON" : "OFF"}
+        {(active || config?.useBuiltInSubtitles) ? "ON" : "OFF"}
       </span>
 
       {showMenu && createPortal(
@@ -775,7 +1018,7 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
               {/* Header */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                  <HummingbirdIcon active={active} />
+                  <StatusIcon active={active} useBuiltIn={!!config?.useBuiltInSubtitles} />
                   <span style={{ fontWeight: "700", fontSize: "14px", color: "#0f172a" }}>即時翻譯</span>
                 </div>
                 <button onClick={closeMenu} style={closeBtnStyle}>✕</button>
@@ -820,7 +1063,10 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
                   boxSizing: "border-box",
                 }}
               >
-                <span style={{ fontWeight: "500" }}>使用影片內建字幕</span>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <IconSubtitles size={16} stroke={1.5} color="#475569" />
+                  <span style={{ fontWeight: "500" }}>使用影片內建字幕</span>
+                </div>
                 <input
                   type="checkbox"
                   checked={config?.useBuiltInSubtitles === true}
@@ -848,7 +1094,30 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
                 onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#f1f5f9")}
                 onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "#f8fafc")}
               >
-                <span>字幕樣式</span>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <IconPalette size={16} stroke={1.5} color="#475569" />
+                  <span>字幕樣式</span>
+                </div>
+                <span style={{ color: "#94a3b8" }}>›</span>
+              </button>
+
+              {/* 字幕下載入口 */}
+              <button
+                onClick={() => setView("download")}
+                style={{
+                  width: "100%", border: "1px solid #e2e8f0", borderRadius: "10px",
+                  padding: "10px 12px", backgroundColor: "#f8fafc",
+                  color: "#475569", fontSize: "12px", cursor: "pointer",
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  transition: "background-color 0.15s",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#f1f5f9")}
+                onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "#f8fafc")}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <IconDownload size={16} stroke={1.5} color="#475569" />
+                  <span>字幕下載</span>
+                </div>
                 <span style={{ color: "#94a3b8" }}>›</span>
               </button>
             </>
@@ -871,6 +1140,98 @@ const PlayerControlButton: React.FC<{ playerContainer: HTMLElement }> = ({ playe
               </div>
               <div style={{ borderTop: "1px solid #e2e8f0", margin: "-4px 0 0" }} />
               <SettingsPanel />
+            </>
+          )}
+
+          {/* ── 字幕下載子頁面 ── */}
+          {view === "download" && (
+            <>
+              {/* Header with back */}
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <button
+                  onClick={() => setView("main")}
+                  style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: "16px", lineHeight: 1, padding: "2px 4px", borderRadius: "4px" }}
+                  title="返回"
+                >
+                  ‹
+                </button>
+                <span style={{ fontWeight: "600", fontSize: "14px", color: "#0f172a", flex: 1 }}>字幕下載</span>
+                <button onClick={closeMenu} style={closeBtnStyle}>✕</button>
+              </div>
+              <div style={{ borderTop: "1px solid #e2e8f0", margin: "-4px 0 0" }} />
+              
+              <div style={{ display: "flex", flexDirection: "column", gap: "10px", padding: "8px 0" }}>
+                {!hasSubtitles ? (
+                  <div style={{ fontSize: "12px", color: "#64748b", textAlign: "center", padding: "10px" }}>
+                    此影片無內建字幕軌或未成功載入。
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => handleDownload("original")}
+                      disabled={!!downloadingType}
+                      style={{
+                        width: "100%", border: "1px solid #cbd5e1", borderRadius: "8px",
+                        padding: "10px 12px", backgroundColor: downloadingType === "original" ? "#f1f5f9" : "#ffffff",
+                        color: "#334155", fontSize: "12px", fontWeight: "600", cursor: downloadingType ? "not-allowed" : "pointer",
+                        transition: "background-color 0.15s, border-color 0.15s",
+                        textAlign: "left",
+                        boxSizing: "border-box",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                      }}
+                      onMouseEnter={(e) => { if (!downloadingType) e.currentTarget.style.backgroundColor = "#f8fafc"; }}
+                      onMouseLeave={(e) => { if (!downloadingType) e.currentTarget.style.backgroundColor = "#ffffff"; }}
+                    >
+                      <IconFileText size={16} stroke={1.5} color="#475569" />
+                      <span>{downloadingType === "original" ? "下載中..." : "下載原文字幕 (.srt)"}</span>
+                    </button>
+ 
+                    <button
+                      onClick={() => handleDownload("translation")}
+                      disabled={!!downloadingType}
+                      style={{
+                        width: "100%", border: "1px solid #cbd5e1", borderRadius: "8px",
+                        padding: "10px 12px", backgroundColor: downloadingType === "translation" ? "#f1f5f9" : "#ffffff",
+                        color: "#334155", fontSize: "12px", fontWeight: "600", cursor: downloadingType ? "not-allowed" : "pointer",
+                        transition: "background-color 0.15s, border-color 0.15s",
+                        textAlign: "left",
+                        boxSizing: "border-box",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                      }}
+                      onMouseEnter={(e) => { if (!downloadingType) e.currentTarget.style.backgroundColor = "#f8fafc"; }}
+                      onMouseLeave={(e) => { if (!downloadingType) e.currentTarget.style.backgroundColor = "#ffffff"; }}
+                    >
+                      <IconLanguage size={16} stroke={1.5} color="#475569" />
+                      <span>{downloadingType === "translation" ? `翻譯並下載中 (${downloadProgress}%)` : "下載譯文字幕 (.srt)"}</span>
+                    </button>
+ 
+                    <button
+                      onClick={() => handleDownload("both")}
+                      disabled={!!downloadingType}
+                      style={{
+                        width: "100%", border: "1px solid #cbd5e1", borderRadius: "8px",
+                        padding: "10px 12px", backgroundColor: downloadingType === "both" ? "#f1f5f9" : "#ffffff",
+                        color: "#334155", fontSize: "12px", fontWeight: "600", cursor: downloadingType ? "not-allowed" : "pointer",
+                        transition: "background-color 0.15s, border-color 0.15s",
+                        textAlign: "left",
+                        boxSizing: "border-box",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                      }}
+                      onMouseEnter={(e) => { if (!downloadingType) e.currentTarget.style.backgroundColor = "#f8fafc"; }}
+                      onMouseLeave={(e) => { if (!downloadingType) e.currentTarget.style.backgroundColor = "#ffffff"; }}
+                    >
+                      <IconSubtitles size={16} stroke={1.5} color="#475569" />
+                      <span>{downloadingType === "both" ? `翻譯並下載中 (${downloadProgress}%)` : "下載雙語對照字幕 (.srt)"}</span>
+                    </button>
+                  </>
+                )}
+              </div>
             </>
           )}
 

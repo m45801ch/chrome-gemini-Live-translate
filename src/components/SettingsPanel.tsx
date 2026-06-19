@@ -118,6 +118,27 @@ const ColorPicker: React.FC<{ value: string; onChange: (c: string) => void }> = 
   );
 };
 
+function formatTimeSRT(ms: number): string {
+  const hours = Math.floor(ms / 3600000);
+  const minutes = Math.floor((ms % 3600000) / 60000);
+  const seconds = Math.floor((ms % 60000) / 1000);
+  const milliseconds = Math.floor(ms % 1000);
+
+  const pad = (n: number, width: number = 2) => String(n).padStart(width, "0");
+
+  return `${pad(hours)}:${pad(minutes)}:${pad(seconds)},${pad(milliseconds, 3)}`;
+}
+
+function exportToSRT(events: any[], type: "original" | "translation"): string {
+  return events
+    .map((ev, index) => {
+      const timeStr = `${formatTimeSRT(ev.start)} --> ${formatTimeSRT(ev.end)}`;
+      const content = type === "original" ? ev.text : (ev.translation || "");
+      return `${index + 1}\n${timeStr}\n${content}\n`;
+    })
+    .join("\n");
+}
+
 // ─── SettingsPanel 主體 ───────────────────────────────────────────────────────
 interface SettingsPanelProps {
   onConfigChange?: (config: AppConfig) => void;
@@ -156,13 +177,26 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onConfigChange }) 
   const resetAll = () => updateConfig((prev) => ({
     ...prev,
     subtitleStyle: {
-      textAlign: "center", maxLines: 3, backgroundOpacity: 75, displayMode: "both",
+      textAlign: "center", maxLines: 3, backgroundOpacity: 75, displayMode: "both", translationPosition: "down",
       main: { fontFamily: "system", fontScale: 100, color: "#ffffff", fontWeight: 400 },
       translation: { fontFamily: "system", fontScale: 110, color: "#ffeb3b", fontWeight: 400 },
     },
   }));
 
   const { subtitleStyle: s } = config;
+
+  const getBtnStyle = (isActive: boolean): React.CSSProperties => ({
+    padding: "4px 10px",
+    fontSize: "12px",
+    borderRadius: "6px",
+    border: "1px solid",
+    borderColor: isActive ? "#0284c7" : "#cbd5e1",
+    backgroundColor: isActive ? "#eff6ff" : "#ffffff",
+    color: isActive ? "#0284c7" : "#334155",
+    cursor: "pointer",
+    transition: "all 0.15s",
+    fontWeight: isActive ? 600 : 400,
+  });
 
   return (
     <div style={panelStyle}>
@@ -177,18 +211,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onConfigChange }) 
                 <button
                   key={mode}
                   onClick={() => updateGlobal("displayMode", mode)}
-                  style={{
-                    padding: "4px 10px",
-                    fontSize: "12px",
-                    borderRadius: "6px",
-                    border: "1px solid",
-                    borderColor: isActive ? "#0284c7" : "#cbd5e1",
-                    backgroundColor: isActive ? "#eff6ff" : "#ffffff",
-                    color: isActive ? "#0284c7" : "#334155",
-                    cursor: "pointer",
-                    transition: "all 0.15s",
-                    fontWeight: isActive ? 600 : 400,
-                  }}
+                  style={getBtnStyle(isActive)}
                 >
                   {labels[mode]}
                 </button>
@@ -197,21 +220,58 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onConfigChange }) 
           </div>
         </Field>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", borderBottom: "1px solid #f1f5f9" }}>
-          <Field label="對齊方式" noBorder>
-            <select value={s.textAlign} onChange={(e) => updateGlobal("textAlign", e.target.value as "center" | "left")} style={selectSm}>
-              <option value="center">置中</option>
-              <option value="left">靠左</option>
-            </select>
-          </Field>
-          <Field label="最大行數" noBorder>
-            <select value={s.maxLines} onChange={(e) => updateGlobal("maxLines", parseInt(e.target.value))} style={selectSm}>
-              <option value={1}>1 行</option>
-              <option value={2}>2 行</option>
-              <option value={3}>3 行</option>
-            </select>
-          </Field>
-        </div>
+        <Field label="對齊方式">
+          <div style={{ display: "flex", gap: "4px" }}>
+            {(["center", "left"] as const).map((align) => {
+              const labels = { center: "置中", left: "靠左" };
+              const isActive = s.textAlign === align;
+              return (
+                <button
+                  key={align}
+                  onClick={() => updateGlobal("textAlign", align)}
+                  style={getBtnStyle(isActive)}
+                >
+                  {labels[align]}
+                </button>
+              );
+            })}
+          </div>
+        </Field>
+
+        <Field label="最大行數">
+          <div style={{ display: "flex", gap: "4px" }}>
+            {([1, 2, 3] as const).map((lines) => {
+              const isActive = s.maxLines === lines;
+              return (
+                <button
+                  key={lines}
+                  onClick={() => updateGlobal("maxLines", lines)}
+                  style={getBtnStyle(isActive)}
+                >
+                  {lines} 行
+                </button>
+              );
+            })}
+          </div>
+        </Field>
+
+        <Field label="譯文位置">
+          <div style={{ display: "flex", gap: "4px" }}>
+            {(["up", "down"] as const).map((pos) => {
+              const labels = { up: "上方", down: "下方" };
+              const isActive = s.translationPosition === pos;
+              return (
+                <button
+                  key={pos}
+                  onClick={() => updateGlobal("translationPosition", pos)}
+                  style={getBtnStyle(isActive)}
+                >
+                  {labels[pos]}
+                </button>
+              );
+            })}
+          </div>
+        </Field>
 
         <SliderField label="背景透明度" value={s.backgroundOpacity} unit="%" min={0} max={100} step={5}
           onChange={(v) => updateGlobal("backgroundOpacity", v)} />
@@ -259,13 +319,21 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onConfigChange }) 
 };
 
 // ─── UI 小元件 ─────────────────────────────────────────────────────────────────
-const Section: React.FC<{ title: string; onReset?: () => void; children: React.ReactNode }> = ({ title, onReset, children }) => (
+const Section: React.FC<{
+  title: string;
+  onReset?: () => void;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}> = ({ title, onReset, action, children }) => (
   <div style={{ marginBottom: "8px" }}>
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
       <span style={{ fontSize: "12px", fontWeight: "600", color: "#0284c7", letterSpacing: "0.02em" }}>{title}</span>
-      {onReset && (
-        <button onClick={onReset} title="重設" style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: "14px", padding: "0 2px", lineHeight: 1 }}>↺</button>
-      )}
+      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+        {action}
+        {onReset && (
+          <button onClick={onReset} title="重設" style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: "14px", padding: "0 2px", lineHeight: 1 }}>↺</button>
+        )}
+      </div>
     </div>
     <div style={{
       backgroundColor: "#ffffff",

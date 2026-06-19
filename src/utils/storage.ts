@@ -10,6 +10,7 @@ export interface SubtitleStyle {
   maxLines: number;
   backgroundOpacity: number; // 0 到 100
   displayMode: "both" | "original" | "translation";
+  translationPosition: "up" | "down";
   main: SubtitleTextStyle;
   translation: SubtitleTextStyle;
 }
@@ -29,6 +30,7 @@ const DEFAULT_STYLE: SubtitleStyle = {
   maxLines: 3,
   backgroundOpacity: 75,
   displayMode: "both",
+  translationPosition: "down",
   main: {
     fontFamily: "system",
     fontScale: 100,
