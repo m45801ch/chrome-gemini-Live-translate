@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "cross-env WXT_SKIP_ENV_VALIDATION=true wxt",
     "build": "cross-env WXT_SKIP_ENV_VALIDATION=true wxt build",
+    "zip": "cross-env WXT_SKIP_ENV_VALIDATION=true wxt zip",
     "postinstall": "cross-env WXT_SKIP_ENV_VALIDATION=true wxt prepare"
   },
   "dependencies": {
