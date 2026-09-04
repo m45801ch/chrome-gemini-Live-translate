@@ -259,7 +259,7 @@ const App: React.FC = () => {
           />
           <div style={{ display: "flex", flexDirection: "column" }}>
             <span style={{ fontWeight: "700", fontSize: "15px", color: "#0f172a" }}>蜂鳥影片即時翻譯</span>
-            <span style={{ fontSize: "11px", color: "#64748b", fontWeight: "500" }}>v1.1.2</span>
+            <span style={{ fontSize: "11px", color: "#64748b", fontWeight: "500" }}>v1.1.5</span>
           </div>
         </div>
 
