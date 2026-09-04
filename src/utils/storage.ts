@@ -25,6 +25,7 @@ export interface AppConfig {
   modelName: string;
   targetLang: string;
   hotSwap: number; // 30, 60, 90, 120, 0
+  liveOutputMode: "text" | "voice"; // 只輸出文字字幕，或語音帶文字
   subtitleStyle: SubtitleStyle;
   useBuiltInSubtitles?: boolean;
   builtInTranslator?: "google" | "microsoft";
@@ -56,12 +57,13 @@ const DEFAULT_STYLE: SubtitleStyle = {
 };
 
 export async function getLiveTranslateConfig(): Promise<AppConfig> {
-  const data = await chrome.storage.local.get(["apiKey", "modelName", "targetLang", "hotSwap", "subtitleStyle", "useBuiltInSubtitles", "builtInTranslator"]);
+  const data = await chrome.storage.local.get(["apiKey", "modelName", "targetLang", "hotSwap", "liveOutputMode", "subtitleStyle", "useBuiltInSubtitles", "builtInTranslator"]);
   return {
     apiKey: data.apiKey || "",
     modelName: data.modelName || "gemini-3.5-live-translate-preview",
     targetLang: data.targetLang || "zh-Hant",
     hotSwap: data.hotSwap !== undefined ? Number(data.hotSwap) : 90,
+    liveOutputMode: data.liveOutputMode === "voice" ? "voice" : "text",
     useBuiltInSubtitles: data.useBuiltInSubtitles === true,
     builtInTranslator: data.builtInTranslator || "google",
     subtitleStyle: {
