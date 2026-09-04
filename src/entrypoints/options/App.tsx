@@ -193,6 +193,7 @@ const App: React.FC = () => {
   const [targetLang, setTargetLang] = useState<string>("zh-Hant");
   const [hotSwap, setHotSwap] = useState<number>(90);
   const [builtInTranslator, setBuiltInTranslator] = useState<"google" | "microsoft">("google");
+  const [liveOutputMode, setLiveOutputMode] = useState<"text" | "voice">("text");
 
   useEffect(() => {
     getLiveTranslateConfig().then((config) => {
@@ -201,6 +202,7 @@ const App: React.FC = () => {
       setTargetLang(config.targetLang);
       setHotSwap(config.hotSwap);
       setBuiltInTranslator(config.builtInTranslator || "google");
+      setLiveOutputMode(config.liveOutputMode === "voice" ? "voice" : "text");
       // 擴充套件可能沒有存 sourceLang，如果有的話讀取
       const anyConfig = config as any;
       if (anyConfig.sourceLang) {
@@ -237,6 +239,12 @@ const App: React.FC = () => {
   const handleBuiltInTranslatorChange = (val: "google" | "microsoft") => {
     setBuiltInTranslator(val);
     saveLiveTranslateConfig({ builtInTranslator: val });
+  };
+
+  const handleLiveOutputModeChange = (val: "text" | "voice") => {
+    setLiveOutputMode(val);
+    saveLiveTranslateConfig({ liveOutputMode: val });
+    chrome.runtime.sendMessage({ type: "liveTranslateOutputModeChanged", data: { outputMode: val } });
   };
 
   return (
@@ -374,6 +382,19 @@ const App: React.FC = () => {
                   <label style={labelStyle}>內建字幕翻譯來源 (Built-in Subtitle Translator)</label>
                   <TranslatorSelect value={builtInTranslator} onChange={handleBuiltInTranslatorChange} />
                   <span style={tipStyle}>* 當使用內建字幕時，所採用的免費翻譯引擎來源。</span>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  <label style={labelStyle}>即時翻譯輸出模式 (Live Output Mode)</label>
+                  <select
+                    value={liveOutputMode}
+                    onChange={(e) => handleLiveOutputModeChange(e.target.value as "text" | "voice")}
+                    style={selectStyle}
+                  >
+                    <option value="text">只輸出文字（預設）</option>
+                    <option value="voice">語音帶文字（靜音原音）</option>
+                  </select>
+                  <span style={tipStyle}>* 語音模式會播放 Gemini 翻譯語音並靜音原影片音；文字模式僅顯示雙語字幕。</span>
                 </div>
 
                 <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
