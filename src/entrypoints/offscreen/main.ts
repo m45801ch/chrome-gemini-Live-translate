@@ -286,8 +286,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               model: `models/${finalModelName}`,
               generationConfig: {
                 responseModalities: ["AUDIO"],
-                inputAudioTranscription: {},
-                outputAudioTranscription: {},
+                // 注意：v1alpha 的 GenerationConfig 沒有 input/outputAudioTranscription 欄位，
+                // 送了會被伺服器以 1007 拒絕（Unknown name）。字幕轉錄不需顯式配置即可下行。
                 translationConfig: {
                   targetLanguageCode: targetLangBCP47,
                 },
