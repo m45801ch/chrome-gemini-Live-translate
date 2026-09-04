@@ -157,16 +157,25 @@ const App: React.FC = () => {
   const [status, setStatus] = useState<string>("disconnected");
   const [errorMsg, setErrorMsg] = useState<string>("");
   const [builtInTranslator, setBuiltInTranslator] = useState<"google" | "microsoft">("google");
+  const [liveOutputMode, setLiveOutputMode] = useState<"text" | "voice">("text");
 
   useEffect(() => {
     getLiveTranslateConfig().then((config) => {
       setBuiltInTranslator(config.builtInTranslator || "google");
+      setLiveOutputMode(config.liveOutputMode === "voice" ? "voice" : "text");
     });
   }, []);
 
   const handleTranslatorChange = (val: "google" | "microsoft") => {
     setBuiltInTranslator(val);
     saveLiveTranslateConfig({ builtInTranslator: val });
+  };
+
+  const handleOutputModeChange = (val: "text" | "voice") => {
+    setLiveOutputMode(val);
+    saveLiveTranslateConfig({ liveOutputMode: val });
+    // 若連線中即時生效；未連線時僅存檔，下次啟動時由 background 帶入
+    chrome.runtime.sendMessage({ type: "liveTranslateOutputModeChanged", data: { outputMode: val } });
   };
 
   useEffect(() => {
@@ -317,6 +326,44 @@ const App: React.FC = () => {
             {isActive ? <IconPlayerStop size={16} /> : <IconPlayerPlay size={16} />}
             <span>{isActive ? "停止即時語音翻譯" : "啟動影片即時語音翻譯"}</span>
           </button>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "4px", marginBottom: "4px" }}>
+            <label style={{ fontSize: "12px", fontWeight: "600", color: "#475569" }}>翻譯輸出模式</label>
+            <div style={{ display: "flex", gap: "6px" }}>
+              <button
+                onClick={() => handleOutputModeChange("text")}
+                style={{
+                  flex: 1,
+                  padding: "8px 10px",
+                  borderRadius: "8px",
+                  border: liveOutputMode === "text" ? "1.5px solid #0284c7" : "1px solid #cbd5e1",
+                  backgroundColor: liveOutputMode === "text" ? "#eff6ff" : "#ffffff",
+                  color: liveOutputMode === "text" ? "#0284c7" : "#475569",
+                  fontSize: "12.5px",
+                  fontWeight: liveOutputMode === "text" ? "600" : "400",
+                  cursor: "pointer",
+                }}
+              >
+                只輸出文字
+              </button>
+              <button
+                onClick={() => handleOutputModeChange("voice")}
+                style={{
+                  flex: 1,
+                  padding: "8px 10px",
+                  borderRadius: "8px",
+                  border: liveOutputMode === "voice" ? "1.5px solid #0284c7" : "1px solid #cbd5e1",
+                  backgroundColor: liveOutputMode === "voice" ? "#eff6ff" : "#ffffff",
+                  color: liveOutputMode === "voice" ? "#0284c7" : "#475569",
+                  fontSize: "12.5px",
+                  fontWeight: liveOutputMode === "voice" ? "600" : "400",
+                  cursor: "pointer",
+                }}
+              >
+                語音帶文字
+              </button>
+            </div>
+          </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "4px", marginBottom: "4px" }}>
             <label style={{ fontSize: "12px", fontWeight: "600", color: "#475569" }}>內建字幕翻譯服務</label>
