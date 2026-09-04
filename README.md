@@ -53,7 +53,7 @@ npm run build
 
 ## 📦 安裝步驟 (下載已打包版本，最簡單)
 
-1.  前往 [Releases 下載最新版本](https://github.com/m45801ch/chrome-gemini-Live-translate/releases/download/v1.1.5/chrome-gemini-live-translate-v1.1.5-chrome-mv3-dev.zip)，將 ZIP 解壓縮到任意目錄（例如桌面）。
+1.  前往 [Releases 下載最新版本](https://github.com/m45801ch/chrome-gemini-Live-translate/releases/download/v1.1.5/chrome-gemini-live-translate-v1.1.5-chrome-mv3.zip)，將 ZIP 解壓縮到任意目錄（例如桌面）。
 2.  開啟 Chrome 瀏覽器，進入擴充功能管理頁面：`chrome://extensions/`
 3.  開啟右上角的 **「開發人員模式」**。
 4.  點擊左上角的 **「載入未封裝項目」**。
