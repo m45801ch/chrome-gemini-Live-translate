@@ -34,6 +34,22 @@ async function ensureOffscreenDocument() {
     reasons: [chrome.offscreen.Reason.USER_MEDIA],
     justification: "Capture tab audio and stream to translation API"
   });
+  // 等待 Offscreen 的 onMessage listener 註冊完成，否則首個啟動訊息會遺失造成永遠 connecting
+  await new Promise((resolve) => setTimeout(resolve, 300));
+}
+
+async function sendToOffscreenWithRetry(message: any, retries = 3): Promise<void> {
+  let lastErr: any = null;
+  for (let i = 0; i < retries; i++) {
+    try {
+      await chrome.runtime.sendMessage(message);
+      return;
+    } catch (err) {
+      lastErr = err;
+      await new Promise((resolve) => setTimeout(resolve, 300 * (i + 1)));
+    }
+  }
+  throw lastErr;
 }
 
 export default defineBackground(() => {
@@ -69,17 +85,24 @@ export default defineBackground(() => {
 
           await ensureOffscreenDocument();
           
-          // 發送給 Offscreen 啟動
-          chrome.runtime.sendMessage({
-            type: "liveTranslateOffscreenStart",
-            data: {
-              streamId,
-              apiKey: config.apiKey,
-              targetLang: config.targetLang,
-              hotSwap: config.hotSwap,
-              modelName: config.modelName,
-            }
-          });
+          // 發送給 Offscreen 啟動（含重試，避免 message 在 Offscreen 就緒前遺失）
+          try {
+            await sendToOffscreenWithRetry({
+              type: "liveTranslateOffscreenStart",
+              data: {
+                streamId,
+                apiKey: config.apiKey,
+                targetLang: config.targetLang,
+                hotSwap: config.hotSwap,
+                modelName: config.modelName,
+                outputMode: config.liveOutputMode,
+              }
+            });
+          } catch (err: any) {
+            console.error("Offscreen 未回應，啟動訊息發送失敗", err);
+            sendResponse({ ok: false, reason: "Offscreen 啟動失敗，請重載擴充功能後再試。" });
+            return;
+          }
 
           updateState(targetTabId, "connecting");
           sendResponse({ ok: true });
@@ -133,13 +156,23 @@ export default defineBackground(() => {
       if (activeTabId) {
         chrome.tabs.sendMessage(activeTabId, message, () => {
           // 忽略可能的分頁已關閉錯誤
-          const err = chrome.runtime.lastError;
+          void chrome.runtime.lastError;
         });
       }
       const nextTabId = (status === "disconnected" || status === "error") ? null : activeTabId;
       updateState(nextTabId, status);
-      // 廣播給 Popup (Popup 可以被點開)
-      chrome.runtime.sendMessage(message);
+      // 廣播給 Popup (Popup 可能已關閉，需吞掉無接收者的錯誤)
+      try {
+        const p = chrome.runtime.sendMessage(message) as unknown as Promise<any> | undefined;
+        if (p && typeof p.catch === "function") p.catch(() => {});
+      } catch {}
+      return false;
+    }
+
+    if (message.type === "liveTranslateOutputModeChanged") {
+      const mode = message.data?.outputMode === "voice" ? "voice" : "text";
+      sendToOffscreenWithRetry({ type: "liveTranslateOutputModeChanged", data: { outputMode: mode } }).catch(() => {});
+      sendResponse({ ok: true, outputMode: mode });
       return false;
     }
 
