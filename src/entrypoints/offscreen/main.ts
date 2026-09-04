@@ -1,5 +1,7 @@
 function mapToBCP47(code: string): string {
   if (!code) return "zh-Hant";
+  const raw = code.trim();
+  if (!raw || raw.toLowerCase() === "auto") return "zh-Hant";
   const normalized = code.toLowerCase().trim().replace("_", "-");
   const explicitMap: Record<string, string> = {
     "zh-hant": "zh-Hant",
@@ -21,6 +23,14 @@ let liveAudioCtx: AudioContext | null = null;
 let liveSourceNode: MediaStreamAudioSourceNode | null = null;
 let liveWorkletNode: AudioWorkletNode | null = null;
 let liveWs: WebSocket | null = null;
+let setupTimeout: ReturnType<typeof setTimeout> | null = null;
+
+let currentOutputMode: "text" | "voice" = "text";
+let playbackCtx: AudioContext | null = null;
+let playbackGain: GainNode | null = null;
+let playbackQueue: AudioBufferSourceNode[] = [];
+let playbackCursor = 0; // 下一個排播時間點（playbackCtx.currentTime 基準）
+let monitorNode: MediaStreamAudioSourceNode | null = null; // 原音監聽節點（voice 模式斷開）
 
 let hotSwapInterval: NodeJS.Timeout | null = null;
 let pendingReconnect = false;
@@ -46,9 +56,98 @@ function stopHotSwapTimer() {
   }
 }
 
+function base64ToInt16(base64: string): Int16Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Int16Array(bytes.buffer);
+}
+
+function ensurePlaybackCtx(): boolean {
+  try {
+    if (!playbackCtx) {
+      playbackCtx = new AudioContext({ sampleRate: 24000 });
+      playbackGain = playbackCtx.createGain();
+      playbackGain.gain.value = 1.0;
+      playbackGain.connect(playbackCtx.destination);
+      playbackCursor = playbackCtx.currentTime;
+    }
+    if (playbackCtx.state === "suspended") void playbackCtx.resume();
+    return true;
+  } catch (e) {
+    console.error("[Offscreen] playback AudioContext 建立失敗，降級為文字模式", e);
+    return false;
+  }
+}
+
+function enqueueTranslatedAudio(base64: string) {
+  if (currentOutputMode !== "voice") return; // text 模式直接丟棄，不重連
+  if (!ensurePlaybackCtx() || !playbackCtx || !playbackGain) {
+    chrome.runtime.sendMessage({
+      type: "sendLiveTranslateStatus",
+      data: { status: "error", error: "語音播放初始化失敗，已降級為文字模式。" },
+    });
+    currentOutputMode = "text";
+    applyOutputMode();
+    return;
+  }
+  try {
+    const int16 = base64ToInt16(base64);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+    const buffer = playbackCtx.createBuffer(1, float32.length, 24000);
+    buffer.copyToChannel(float32 as Float32Array<ArrayBuffer>, 0);
+    const src = playbackCtx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(playbackGain);
+    const startAt = Math.max(playbackCursor, playbackCtx.currentTime);
+    src.start(startAt);
+    playbackCursor = startAt + buffer.duration;
+    src.onended = () => {
+      const idx = playbackQueue.indexOf(src);
+      if (idx >= 0) playbackQueue.splice(idx, 1);
+    };
+    playbackQueue.push(src);
+  } catch (e) {
+    console.error("[Offscreen] 單塊翻譯音訊解碼/排播失敗，已跳過", e);
+  }
+}
+
+function applyOutputMode() {
+  // voice：斷開原音監聽，只播翻譯；text：恢復原音監聽
+  try {
+    if (currentOutputMode === "voice") {
+      monitorNode?.disconnect();
+    } else {
+      try {
+        monitorNode?.disconnect();
+      } catch {}
+      if (monitorNode && liveAudioCtx) monitorNode.connect(liveAudioCtx.destination);
+      // 切回文字時清空播放佇列，避免殘音
+      playbackQueue.forEach((n) => {
+        try { n.stop(); } catch {}
+      });
+      playbackQueue = [];
+      if (playbackCtx) playbackCursor = playbackCtx.currentTime;
+    }
+  } catch (e) {
+    console.error("[Offscreen] applyOutputMode 失敗", e);
+  }
+}
+
+function setOutputMode(mode: "text" | "voice") {
+  currentOutputMode = mode === "voice" ? "voice" : "text";
+  applyOutputMode();
+}
+
 function stopLiveTranslateCore() {
   stopHotSwapTimer();
   pendingReconnect = false;
+
+  if (setupTimeout) {
+    clearTimeout(setupTimeout);
+    setupTimeout = null;
+  }
 
   if (liveWs) {
     liveWs.onclose = null;
@@ -76,6 +175,21 @@ function stopLiveTranslateCore() {
     liveAudioStream = null;
   }
 
+  playbackQueue.forEach((n) => {
+    try { n.stop(); } catch {}
+    try { n.disconnect(); } catch {}
+  });
+  playbackQueue = [];
+  if (playbackGain) {
+    try { playbackGain.disconnect(); } catch {}
+    playbackGain = null;
+  }
+  if (playbackCtx) {
+    void playbackCtx.close().catch(() => {});
+    playbackCtx = null;
+  }
+  monitorNode = null;
+
   if (liveAudioCtx) {
     void liveAudioCtx.close();
     liveAudioCtx = null;
@@ -85,8 +199,9 @@ function stopLiveTranslateCore() {
 // 監聽來自 Background 的訊息
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "liveTranslateOffscreenStart") {
-    const { streamId, apiKey, targetLang, hotSwap, modelName: incomingModelName } = message.data;
+    const { streamId, apiKey, targetLang, hotSwap, modelName: incomingModelName, outputMode } = message.data;
     stopLiveTranslateCore();
+    setOutputMode(outputMode === "voice" ? "voice" : "text");
 
     // 通知狀態：正在連線
     chrome.runtime.sendMessage({ type: "sendLiveTranslateStatus", data: { status: "connecting" } });
@@ -102,10 +217,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }).then(async (stream) => {
       liveAudioStream = stream;
       liveAudioCtx = new AudioContext({ sampleRate: 16000 });
+      // Chrome 新版會將 Offscreen 的 AudioContext 初始為 suspended，必須 resume 否則 Worklet 無資料
+      try {
+        await liveAudioCtx.resume();
+      } catch {}
 
-      // 播放分頁音訊給使用者聽（否則分頁在被擷取時會靜音）
-      const destinationNode = liveAudioCtx.createMediaStreamSource(liveAudioStream);
-      destinationNode.connect(liveAudioCtx.destination);
+      // 播放分頁音訊給使用者聽（否則分頁在被擷取時會靜音；voice 模式由 applyOutputMode 斷開）
+      monitorNode = liveAudioCtx.createMediaStreamSource(liveAudioStream);
+      monitorNode.connect(liveAudioCtx.destination);
+      applyOutputMode();
 
       // 載入 Worklet 處理器
       await liveAudioCtx.audioWorklet.addModule(chrome.runtime.getURL("audio-processor.js"));
@@ -166,6 +286,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               model: `models/${finalModelName}`,
               generationConfig: {
                 responseModalities: ["AUDIO"],
+                inputAudioTranscription: {},
+                outputAudioTranscription: {},
                 translationConfig: {
                   targetLanguageCode: targetLangBCP47,
                 },
@@ -174,6 +296,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           };
           liveWs?.send(JSON.stringify(setup));
           startHotSwapTimer(Number(hotSwap), apiKey, targetLang);
+          // 若 15 秒內沒收到 setupComplete，代表交握卡住，主動回報錯誤而非永遠 connecting
+          if (setupTimeout) clearTimeout(setupTimeout);
+          setupTimeout = setTimeout(() => {
+            if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+              console.error("[Offscreen] setupComplete timeout (15s)");
+              chrome.runtime.sendMessage({
+                type: "sendLiveTranslateStatus",
+                data: { status: "error", error: "連線逾時：伺服器未回傳 setupComplete，請檢查 API Key 配額、模型名稱與網路。" },
+              });
+            }
+          }, 15000);
         };
 
         liveWs.onmessage = async (event) => {
@@ -193,6 +326,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
             if (data.setupComplete !== undefined) {
               console.warn("[Offscreen] Gemini setupComplete received");
+              if (setupTimeout) {
+                clearTimeout(setupTimeout);
+                setupTimeout = null;
+              }
               chrome.runtime.sendMessage({ type: "sendLiveTranslateStatus", data: { status: "connected" } });
               return;
             }
@@ -238,6 +375,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 if (textVal && !translationText) {
                   translationText = textVal;
                 }
+                // 翻譯語音（24kHz PCM base64），text 模式由 enqueue 內部丟棄
+                const parts = (sc.modelTurn as any).parts;
+                if (Array.isArray(parts)) {
+                  for (const p of parts) {
+                    if (typeof p?.inlineData?.data === "string" && p.inlineData.data.length > 0) {
+                      enqueueTranslatedAudio(p.inlineData.data);
+                    }
+                  }
+                }
               }
 
               if (sc.turnComplete) {
@@ -273,6 +419,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         liveWs.onclose = (e) => {
           console.warn("[Offscreen] Gemini WebSocket closed", e.code, e.reason);
           stopHotSwapTimer();
+          if (setupTimeout) {
+            clearTimeout(setupTimeout);
+            setupTimeout = null;
+          }
           if (pendingReconnect) {
             pendingReconnect = false;
             console.warn("[Offscreen] 熱切換定時重新連線中...");
@@ -316,6 +466,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     stopLiveTranslateCore();
     chrome.runtime.sendMessage({ type: "sendLiveTranslateStatus", data: { status: "disconnected" } });
     sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type === "liveTranslateOutputModeChanged") {
+    setOutputMode(message.data?.outputMode === "voice" ? "voice" : "text");
+    sendResponse({ ok: true, outputMode: currentOutputMode });
     return false;
   }
 });
