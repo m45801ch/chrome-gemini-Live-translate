@@ -51,17 +51,16 @@ npm run build
 
 ---
 
-## 📦 安裝步驟 (手動載入未封裝擴充套件)
+## 📦 安裝步驟 (下載已打包版本，最簡單)
 
-1.  在專案根目錄下執行生產建置命令：
-    ```bash
-    npm run build
-    ```
+1.  前往 [Releases 下載最新版本](https://github.com/m45801ch/chrome-gemini-Live-translate/releases/download/v1.1.5/chrome-gemini-live-translate-v1.1.5-chrome-mv3-dev.zip)，將 ZIP 解壓縮到任意目錄（例如桌面）。
 2.  開啟 Chrome 瀏覽器，進入擴充功能管理頁面：`chrome://extensions/`
 3.  開啟右上角的 **「開發人員模式」**。
 4.  點擊左上角的 **「載入未封裝項目」**。
-5.  選擇專案目錄下的 `.output/chrome-mv3` 資料夾。
-6.  安裝完成後，即可在右上角看到「蜂鳥影片即時翻譯」圖示。
+5.  選擇剛剛解壓縮的目錄（裡面應包含 `manifest.json`）。
+6.  安裝完成後，即可在工具列看到「蜂鳥影片即時翻譯」圖示（若沒出現，點擊工具列拼圖圖示將它釘選）。
+
+> 💡 之後有新版本時，重複步驟 1（覆蓋解壓縮到同一目錄），再到 `chrome://extensions/` 按擴充功能卡片上的 ⟳ 重新載入即可。
 
 ---
 
